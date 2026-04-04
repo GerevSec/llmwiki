@@ -1,0 +1,192 @@
+CREATE TYPE document_status AS ENUM ('pending', 'processing', 'ready', 'failed', 'archived');
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+CREATE TABLE api_keys (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT,
+    key_hash TEXT NOT NULL UNIQUE,
+    key_prefix TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE TABLE knowledge_bases (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    UNIQUE(user_id, slug)
+);
+
+CREATE TABLE documents (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    knowledge_base_id UUID NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id),
+    filename TEXT NOT NULL,
+    title TEXT,
+    path TEXT DEFAULT '/' NOT NULL,
+    file_type TEXT NOT NULL,
+    file_size BIGINT DEFAULT 0 NOT NULL,
+    status document_status DEFAULT 'pending' NOT NULL,
+    page_count INTEGER,
+    content TEXT,
+    tags TEXT[] DEFAULT '{}' NOT NULL,
+    url TEXT,
+    version INTEGER DEFAULT 0 NOT NULL,
+    archived BOOLEAN DEFAULT false NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+CREATE TABLE document_pages (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    elements JSONB,
+    UNIQUE(document_id, page)
+);
+
+CREATE INDEX idx_documents_knowledge_base_id ON documents(knowledge_base_id);
+CREATE INDEX idx_documents_user_id ON documents(user_id);
+CREATE INDEX idx_documents_tags ON documents USING GIN(tags);
+CREATE INDEX idx_documents_kb_path ON documents(knowledge_base_id, path);
+CREATE INDEX idx_documents_kb_status ON documents(knowledge_base_id, status) WHERE NOT archived;
+CREATE INDEX idx_api_keys_user_id ON api_keys(user_id);
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE knowledge_bases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_pages ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY users_select ON users
+    FOR SELECT USING (id = auth.uid());
+
+CREATE POLICY users_update ON users
+    FOR UPDATE USING (id = auth.uid());
+
+CREATE POLICY api_keys_all ON api_keys
+    FOR ALL USING (user_id = auth.uid());
+
+CREATE POLICY knowledge_bases_all ON knowledge_bases
+    FOR ALL USING (user_id = auth.uid());
+
+CREATE POLICY documents_all ON documents
+    FOR ALL USING (user_id = auth.uid());
+
+CREATE POLICY document_pages_all ON document_pages
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM documents
+            WHERE documents.id = document_pages.document_id
+              AND documents.user_id = auth.uid()
+        )
+    );
+
+CREATE OR REPLACE FUNCTION generate_slug(name TEXT, p_user_id UUID)
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    base_slug TEXT;
+    candidate TEXT;
+    counter INTEGER := 0;
+BEGIN
+    base_slug := lower(regexp_replace(trim(name), '[^a-zA-Z0-9]+', '-', 'g'));
+    base_slug := trim(both '-' from base_slug);
+
+    IF base_slug = '' THEN
+        base_slug := 'untitled';
+    END IF;
+
+    candidate := base_slug;
+
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM knowledge_bases
+            WHERE slug = candidate AND user_id = p_user_id
+        ) THEN
+            RETURN candidate;
+        END IF;
+        counter := counter + 1;
+        candidate := base_slug || '-' || counter;
+    END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    INSERT INTO public.users (id, email, display_name)
+    VALUES (
+        NEW.id,
+        NEW.email,
+        COALESCE(NEW.raw_user_meta_data ->> 'display_name', NEW.raw_user_meta_data ->> 'full_name')
+    );
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION set_knowledge_base_slug()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.slug IS NULL OR NEW.slug = '' THEN
+        NEW.slug := generate_slug(NEW.name, NEW.user_id);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION handle_new_user();
+
+CREATE TRIGGER set_knowledge_base_slug
+    BEFORE INSERT ON knowledge_bases
+    FOR EACH ROW
+    EXECUTE FUNCTION set_knowledge_base_slug();
+
+CREATE TRIGGER set_users_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER set_knowledge_bases_updated_at
+    BEFORE UPDATE ON knowledge_bases
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER set_documents_updated_at
+    BEFORE UPDATE ON documents
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
