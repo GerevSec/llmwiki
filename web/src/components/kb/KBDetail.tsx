@@ -385,7 +385,8 @@ export function KBDetail({ kbId, kbName }: Props) {
     }
 
     return () => { cancelled = true }
-  }, [indexDoc?.id, token, wikiDocs])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indexDoc?.id, token, wikiDocs.length, wikiDocs.map((d) => d.id).join()])
 
   // Auto-select first wiki page
   React.useEffect(() => {
