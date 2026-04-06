@@ -19,7 +19,17 @@ import { cn } from '@/lib/utils'
 import { SourceContextMenu, SourceAreaContextMenu } from '@/components/kb/ContextMenus'
 import { WikiSelector } from '@/components/kb/WikiSelector'
 import { SidenavUserMenu } from '@/components/kb/SidenavUserMenu'
+import { apiFetch } from '@/lib/api'
+import { useUserStore } from '@/stores'
 import type { DocumentListItem, WikiNode, WikiSubsection } from '@/lib/types'
+
+interface Usage {
+  total_pages: number
+  total_storage_bytes: number
+  document_count: number
+  max_pages: number
+  max_storage_bytes: number
+}
 
 interface SourceNode {
   type: 'folder' | 'document'
@@ -410,8 +420,9 @@ export function KBSidenav({
         onClose={() => setAreaContextOpen(false)}
       />
 
-      {/* User menu at bottom */}
-      <div className="shrink-0 border-t border-border p-2">
+      {/* Page usage + user menu at bottom */}
+      <div className="shrink-0 border-t border-border p-2 space-y-1">
+        <PageUsageBar />
         <SidenavUserMenu />
       </div>
 
@@ -714,6 +725,77 @@ function SourceTreeNode({
         onClose={() => setContextOpen(false)}
       />
     </div>
+  )
+}
+
+function PageUsageBar() {
+  const token = useUserStore((s) => s.accessToken)
+  const [usage, setUsage] = React.useState<Usage | null>(null)
+  const [modalOpen, setModalOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!token) return
+    apiFetch<Usage>('/v1/usage', token)
+      .then(setUsage)
+      .catch(() => {})
+  }, [token])
+
+  if (!usage) return null
+
+  const pct = Math.min(100, (usage.total_pages / usage.max_pages) * 100)
+  const color =
+    pct > 90 ? 'bg-destructive' : pct > 70 ? 'bg-yellow-500' : 'bg-primary'
+
+  return (
+    <>
+      <button
+        onClick={() => setModalOpen(true)}
+        className="flex items-center gap-2 w-full px-2 py-1 rounded-md hover:bg-accent transition-colors cursor-pointer group"
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between mb-0.5">
+            <span className="text-[10px] text-muted-foreground/60 group-hover:text-muted-foreground transition-colors">
+              Pages
+            </span>
+            <span className="text-[10px] font-mono text-muted-foreground/40 group-hover:text-muted-foreground/60 transition-colors">
+              {usage.total_pages} / {usage.max_pages}
+            </span>
+          </div>
+          <div className="h-1 rounded-full bg-muted overflow-hidden">
+            <div
+              className={cn('h-full rounded-full transition-all', color)}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      </button>
+
+      <Dialog open={modalOpen} onOpenChange={setModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Page Usage</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              You've used <span className="font-medium text-foreground">{usage.total_pages.toLocaleString()}</span> of
+              your <span className="font-medium text-foreground">{usage.max_pages.toLocaleString()}</span> page limit.
+            </p>
+            <div className="h-2 rounded-full bg-muted overflow-hidden">
+              <div
+                className={cn('h-full rounded-full transition-all', color)}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <p>
+              Each PDF or office document consumes pages based on its length. Notes and wiki pages are free and unlimited.
+            </p>
+            <p className="text-xs text-muted-foreground/60">
+              Individual documents are limited to 300 pages. Need more capacity? Contact us.
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 

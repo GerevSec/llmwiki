@@ -1,8 +1,9 @@
+import base64
 import json
 import logging
 
 from mcp.server.fastmcp import FastMCP, Context
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.types import TextContent, ImageContent
 
 from db import scoped_query, scoped_queryrow
 from .helpers import (
@@ -12,7 +13,27 @@ from .helpers import (
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_CHARS = 30_000
+MAX_BATCH_CHARS = 120_000
+
+_IMG_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+
+
+def _text(s: str) -> TextContent:
+    return TextContent(type="text", text=s)
+
+
+def _image(data: bytes, fmt: str) -> ImageContent:
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(data).decode(),
+        mimeType=_IMG_MIME.get(fmt, f"image/{fmt}"),
+    )
 
 
 def _extract_sections(content: str, section_names: list[str]) -> str:
@@ -42,7 +63,9 @@ def _extract_sections(content: str, section_names: list[str]) -> str:
     return "\n\n".join(matched)
 
 
-async def _read_pages(doc: dict, kb: dict, header: str, pages_str: str) -> str | list:
+async def _read_pages(
+    doc: dict, kb: dict, header: str, pages_str: str, include_images: bool = False,
+) -> str | list:
     max_page = doc["page_count"] or 1
     page_nums = parse_page_range(pages_str, max_page)
     if not page_nums:
@@ -61,9 +84,14 @@ async def _read_pages(doc: dict, kb: dict, header: str, pages_str: str) -> str |
     if not page_rows:
         return header + f"No page data found for pages {pages_str}."
 
-    result_parts: list[str | Image] = [header]
+    content_blocks: list[TextContent | ImageContent] = [_text(header)]
+    has_images = False
+
     for row in page_rows:
-        result_parts.append(f"**— Page {row['page']} —**\n\n{row['content']}")
+        content_blocks.append(_text(f"**— Page {row['page']} —**\n\n{row['content']}"))
+
+        if not include_images:
+            continue
 
         elements = row["elements"]
         if not elements:
@@ -72,9 +100,6 @@ async def _read_pages(doc: dict, kb: dict, header: str, pages_str: str) -> str |
             elements = json.loads(elements)
 
         images = elements.get("images", [])
-        if not images:
-            continue
-
         for img_meta in images:
             img_id = img_meta.get("id")
             if not img_id:
@@ -83,11 +108,12 @@ async def _read_pages(doc: dict, kb: dict, header: str, pages_str: str) -> str |
             img_bytes = await load_s3_bytes(s3_key)
             if img_bytes:
                 fmt = "jpeg" if img_id.endswith((".jpg", ".jpeg")) else "png"
-                result_parts.append(Image(data=img_bytes, format=fmt))
+                content_blocks.append(_image(img_bytes, fmt))
+                has_images = True
 
-    if any(isinstance(p, Image) for p in result_parts):
-        return result_parts
-    return "\n\n".join(p for p in result_parts if isinstance(p, str))
+    if has_images:
+        return content_blocks
+    return "\n\n".join(b.text for b in content_blocks)
 
 
 async def _read_spreadsheet_index(doc: dict, header: str) -> str:
@@ -116,7 +142,7 @@ async def _read_spreadsheet_index(doc: dict, header: str) -> str:
 async def _read_batch(user_id: str, kb: dict, path: str) -> str:
     docs = await scoped_query(
         user_id,
-        "SELECT id, filename, title, path, content, tags, file_type "
+        "SELECT id, filename, title, path, content, tags, file_type, page_count "
         "FROM documents WHERE knowledge_base_id = $1 AND NOT archived "
         "ORDER BY path, filename",
         kb["id"],
@@ -129,32 +155,66 @@ async def _read_batch(user_id: str, kb: dict, path: str) -> str:
         return f"No documents matching `{path}` in {kb['slug']}."
 
     text_types = {"md", "txt", "csv", "html", "svg", "json", "xml"}
-    readable = [d for d in docs if (d["file_type"] or "") in text_types and d["content"]]
-    skipped = [d for d in docs if d not in readable]
-
-    if not readable:
-        lines = [f"**{len(skipped)} binary/empty file(s)** matching `{path}` — read individually with page ranges."]
-        for d in skipped:
-            lines.append(f"  {d['path']}{d['filename']} ({d['file_type']})")
-        return "\n".join(lines)
-
-    budget = MAX_BATCH_CHARS // len(readable)
-    any_truncated = False
     parts = []
+    chars_used = 0
+    truncated_docs = 0
+    skipped_docs = []
 
-    for doc in readable:
-        content = doc["content"] or ""
+    for doc in docs:
+        if chars_used >= MAX_BATCH_CHARS:
+            skipped_docs.append(doc)
+            continue
+
         link = deep_link(kb["slug"], doc["path"], doc["filename"])
-        if len(content) > budget:
-            content = content[:budget] + "\n\n... (truncated)"
-            any_truncated = True
-        parts.append(f"### [{doc['path']}{doc['filename']}]({link})\n\n{content}")
+        ft = doc["file_type"] or ""
+        remaining = MAX_BATCH_CHARS - chars_used
 
-    header = f"**{len(readable)} document(s)** matching `{path}`"
-    if any_truncated:
-        header += f" ({budget:,} char budget per doc)"
-    if skipped:
-        header += f"\n*{len(skipped)} binary/empty file(s) skipped — read individually with page ranges*"
+        if ft in text_types and doc["content"]:
+            content = doc["content"] or ""
+            if len(content) > remaining:
+                content = content[:remaining] + "\n\n... (truncated)"
+                truncated_docs += 1
+            parts.append(f"### [{doc['path']}{doc['filename']}]({link})\n\n{content}")
+            chars_used += len(content)
+
+        elif (doc.get("page_count") or 0) > 0:
+            page_rows = await scoped_query(
+                user_id,
+                "SELECT page, content FROM document_pages "
+                "WHERE document_id = $1 ORDER BY page",
+                doc["id"],
+            )
+            page_parts = []
+            doc_chars = 0
+            pages_included = 0
+            for r in page_rows:
+                page_text = f"**— Page {r['page']} —**\n\n{r['content']}"
+                if doc_chars + len(page_text) > remaining:
+                    page_parts.append(page_text[:remaining - doc_chars] + "\n\n... (truncated)")
+                    truncated_docs += 1
+                    pages_included += 1
+                    doc_chars = remaining
+                    break
+                page_parts.append(page_text)
+                doc_chars += len(page_text)
+                pages_included += 1
+
+            total_pages = doc["page_count"]
+            remaining_pages = total_pages - pages_included
+            suffix = ""
+            if remaining_pages > 0:
+                suffix = f"\n\n*({remaining_pages} more pages — use `pages=\"{pages_included+1}-{total_pages}\"` to continue)*"
+            parts.append(f"### [{doc['path']}{doc['filename']}]({link}) ({total_pages} pages)\n\n" + "\n\n".join(page_parts) + suffix)
+            chars_used += doc_chars
+
+        else:
+            skipped_docs.append(doc)
+
+    header = f"**{len(parts)} document(s)** matching `{path}`"
+    if truncated_docs:
+        header += f" (some truncated to fit {MAX_BATCH_CHARS:,} char budget)"
+    if skipped_docs:
+        header += f"\n*{len(skipped_docs)} more document(s) beyond budget — read individually*"
     header += "\n\n---\n\n"
 
     return header + "\n\n---\n\n".join(parts)
@@ -171,13 +231,17 @@ def register(mcp: FastMCP) -> None:
             "- `path=\"*.md\"` — read all markdown files in root\n"
             "- `path=\"/wiki/**\"` — read all wiki pages\n"
             "- `path=\"**/*.md\"` — read all markdown files everywhere\n\n"
-            "Batch reads concatenate text content (md, txt, csv, etc.) with citable links and truncate at 30k characters. "
-            "Binary files (PDFs, images) are listed but must be read individually with page ranges.\n\n"
-            "For PDFs and office docs, use `pages` to read specific page ranges (e.g. '1-5', '3').\n"
+            "Batch reads are the PREFERRED way to read multiple documents at once — use them generously.\n"
+            "Glob reads sample the first few pages from each document (including PDFs) up to a 60k char budget. "
+            "This gives you a broad overview of an entire folder in one call. Read individual files for full content.\n\n"
+            "For PDFs and office docs, use `pages` to read specific page ranges (e.g. '1-50', '3', '10-30').\n"
+            "You can read up to 50+ pages in a single call — use wide ranges to avoid unnecessary round trips.\n"
             "For spreadsheets, each sheet is a page (call without pages first to see sheet names).\n"
-            "Images on requested pages are automatically included in the response.\n\n"
+            "Set `include_images=true` to include embedded images (e.g. figures in PDFs, standalone image files). "
+            "Off by default to save context — enable when you need to see charts, diagrams, or photos.\n\n"
             "When reading sources to compile wiki pages, note the filename and page ranges for citation."
         ),
+        structured_output=False,
     )
     async def read(
         ctx: Context,
@@ -185,6 +249,7 @@ def register(mcp: FastMCP) -> None:
         path: str,
         pages: str = "",
         sections: list[str] | None = None,
+        include_images: bool = False,
     ) -> str | list:
         user_id = get_user_id(ctx)
 
@@ -232,18 +297,20 @@ def register(mcp: FastMCP) -> None:
 
         image_types = {"png", "jpg", "jpeg", "webp", "gif"}
         if file_type in image_types:
+            if not include_images:
+                return header + "(Image file — set `include_images=true` to view)"
             s3_key = f"{doc['user_id']}/{doc['id']}/source.{file_type}"
             img_bytes = await load_s3_bytes(s3_key)
             if img_bytes:
                 fmt = "jpeg" if file_type in ("jpg", "jpeg") else file_type
-                return [header, Image(data=img_bytes, format=fmt)]
+                return [_text(header), _image(img_bytes, fmt)]
             return header + "(Image could not be loaded from storage)"
 
         has_pages = file_type in ("pdf", "pptx", "ppt", "docx", "doc", "xlsx", "xls", "csv")
         spreadsheet_types = {"xlsx", "xls", "csv"}
 
         if has_pages and pages:
-            return await _read_pages(doc, kb, header, pages)
+            return await _read_pages(doc, kb, header, pages, include_images)
 
         if file_type in spreadsheet_types and not pages:
             return await _read_spreadsheet_index(doc, header)

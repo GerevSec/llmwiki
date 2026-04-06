@@ -115,6 +115,17 @@ function buildTreeFromDocs(docs: DocumentListItem[]): WikiNode[] {
     tree.push({ title: folderTitle, children: children.map((c) => ({ title: c.title, path: c.path })) })
   }
 
+  // Sort: Overview first, Log last, everything else alphabetical
+  const slug = (n: WikiNode) => n.path?.replace(/\.(md|txt|json)$/, '').split('/')[0] ?? ''
+  tree.sort((a, b) => {
+    const sa = slug(a), sb = slug(b)
+    if (sa === 'overview') return -1
+    if (sb === 'overview') return 1
+    if (sa === 'log') return 1
+    if (sb === 'log') return -1
+    return a.title.localeCompare(b.title)
+  })
+
   return tree
 }
 

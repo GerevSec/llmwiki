@@ -350,7 +350,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         const text = childrenToText(children)
         const id = slugify(text)
         return (
-          <h1 id={id} className="text-2xl font-bold tracking-tight mt-10 mb-4 first:mt-0 scroll-mt-20">
+          <h1 id={id} className="text-2xl font-bold tracking-tight mt-8 mb-3 first:mt-0 scroll-mt-20">
             {children}
           </h1>
         )
@@ -359,7 +359,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         const text = childrenToText(children)
         const id = slugify(text)
         return (
-          <h2 id={id} className="text-xl font-semibold tracking-tight mt-10 mb-4 pt-4 border-t border-border/50 first:border-0 first:pt-0 scroll-mt-20">
+          <h2 id={id} className="text-xl font-semibold tracking-tight mt-8 mb-2 pt-3 border-t border-border/50 first:border-0 first:pt-0 scroll-mt-20">
             {children}
           </h2>
         )
@@ -368,7 +368,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         const text = childrenToText(children)
         const id = slugify(text)
         return (
-          <h3 id={id} className="text-lg font-medium tracking-tight mt-8 mb-3 scroll-mt-20">
+          <h3 id={id} className="text-lg font-medium tracking-tight mt-6 mb-1.5 scroll-mt-20">
             {children}
           </h3>
         )
@@ -377,13 +377,13 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         const text = childrenToText(children)
         const id = slugify(text)
         return (
-          <h4 id={id} className="text-base font-medium mt-6 mb-2 scroll-mt-20">
+          <h4 id={id} className="text-base font-medium mt-5 mb-1 scroll-mt-20">
             {children}
           </h4>
         )
       },
       p({ children }) {
-        return <p className="my-4 leading-[1.8] text-foreground/90">{children}</p>
+        return <p className="my-2.5 leading-[1.7] text-foreground/90">{children}</p>
       },
       pre({ children, ...props }) {
         const child = React.Children.toArray(children)[0]
@@ -403,7 +403,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         }
         return (
           <pre
-            className="text-[13px] leading-relaxed my-5 bg-muted/60 border border-border rounded-lg p-4 overflow-x-auto"
+            className="text-[13px] leading-relaxed my-3 bg-muted/60 border border-border rounded-lg p-4 overflow-x-auto"
             {...props}
           >
             {children}
@@ -555,7 +555,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
       blockquote({ children, ...props }) {
         return (
           <blockquote
-            className="border-l-[3px] border-accent-blue/40 pl-4 my-6 py-1 text-muted-foreground bg-accent-blue/[0.03] rounded-r-md"
+            className="border-l-[3px] border-accent-blue/40 pl-4 my-3 py-1 text-muted-foreground bg-accent-blue/[0.03] rounded-r-md"
             {...props}
           >
             {children}
@@ -564,14 +564,14 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
       },
       ul({ children, ...props }) {
         return (
-          <ul className="my-4 space-y-1.5 list-disc pl-5 marker:text-muted-foreground/40" {...props}>
+          <ul className="my-2.5 space-y-0.5 list-disc pl-5 marker:text-muted-foreground/40" {...props}>
             {children}
           </ul>
         )
       },
       ol({ children, ...props }) {
         return (
-          <ol className="my-4 space-y-1.5 list-decimal pl-5 marker:text-muted-foreground/40" {...props}>
+          <ol className="my-2.5 space-y-0.5 list-decimal pl-5 marker:text-muted-foreground/40" {...props}>
             {children}
           </ol>
         )
@@ -596,13 +596,13 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
           )
         }
         return (
-          <li className="my-1 leading-[1.8]" {...props}>
+          <li className="my-0.5 leading-[1.7]" {...props}>
             {children}
           </li>
         )
       },
       hr() {
-        return <hr className="my-8 border-border/60" />
+        return <hr className="my-6 border-border/60" />
       },
       img({ src, alt }) {
         return (
