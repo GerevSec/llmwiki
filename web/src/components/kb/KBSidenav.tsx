@@ -283,49 +283,51 @@ export function KBSidenav({
         </CommandList>
       </CommandDialog>
 
-      {/* Wiki section */}
-      <div className="px-2 pt-1 shrink-0" style={{ minHeight: 120 }}>
-        <div className="flex items-center px-2 mb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
-            Wiki
-          </span>
+      {/* Wiki + Sources — share remaining space, each scrollable */}
+      <div className="flex-1 min-h-0 flex flex-col">
+        {/* Wiki section */}
+        <div className="flex flex-col min-h-0 px-2 pt-1" style={{ maxHeight: '50%' }}>
+          <div className="flex items-center px-2 mb-1 shrink-0">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">
+              Wiki
+            </span>
+          </div>
+          {loading ? (
+            <SidenavSkeleton lines={3} />
+          ) : hasWiki ? (
+            <div className="overflow-y-auto no-scrollbar space-y-0.5">
+              {wikiTree.map((node, i) => (
+                <WikiTreeNode
+                  key={node.path ?? node.title ?? i}
+                  node={node}
+                  depth={0}
+                  activePath={wikiActivePath}
+                  onNavigate={onWikiNavigate}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="px-2 py-4 text-center">
+              <BookOpen className="size-6 text-muted-foreground/20 mx-auto mb-2" />
+              <p className="text-xs text-muted-foreground mb-2">No wiki yet</p>
+              <a
+                href="https://claude.ai"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Open Claude
+                <ArrowUpRight className="size-3" />
+              </a>
+            </div>
+          )}
         </div>
-        {loading ? (
-          <SidenavSkeleton lines={3} />
-        ) : hasWiki ? (
-          <div className="space-y-0.5">
-            {wikiTree.map((node, i) => (
-              <WikiTreeNode
-                key={node.path ?? node.title ?? i}
-                node={node}
-                depth={0}
-                activePath={wikiActivePath}
-                onNavigate={onWikiNavigate}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="px-2 py-4 text-center">
-            <BookOpen className="size-6 text-muted-foreground/20 mx-auto mb-2" />
-            <p className="text-xs text-muted-foreground mb-2">No wiki yet</p>
-            <a
-              href="https://claude.ai"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Open Claude
-              <ArrowUpRight className="size-3" />
-            </a>
-          </div>
-        )}
-      </div>
 
-      {/* Sources section — fills remaining height */}
-      <div
-        className="flex-1 min-h-0 flex flex-col px-2 mt-2"
-        onContextMenu={handleSourcesAreaContext}
-      >
+        {/* Sources section */}
+        <div
+          className="flex-1 min-h-0 flex flex-col px-2 mt-2"
+          onContextMenu={handleSourcesAreaContext}
+        >
         <div className="flex items-center shrink-0">
           <button
             onClick={toggleSources}
@@ -404,6 +406,7 @@ export function KBSidenav({
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Area-level context menu (right-click anywhere in sources) */}

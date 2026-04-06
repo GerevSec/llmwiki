@@ -359,7 +359,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         const text = childrenToText(children)
         const id = slugify(text)
         return (
-          <h2 id={id} className="text-xl font-semibold tracking-tight mt-8 mb-2 pt-3 border-t border-border/50 first:border-0 first:pt-0 scroll-mt-20">
+          <h2 id={id} className="text-xl font-semibold tracking-tight mt-6 mb-2 pt-2 border-t border-border/50 first:border-0 first:pt-0 scroll-mt-20">
             {children}
           </h2>
         )
@@ -383,7 +383,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
         )
       },
       p({ children }) {
-        return <p className="my-2.5 leading-[1.7] text-foreground/90">{children}</p>
+        return <p className="my-2 leading-[1.65] text-foreground/90">{children}</p>
       },
       pre({ children, ...props }) {
         const child = React.Children.toArray(children)[0]
@@ -596,7 +596,7 @@ export function WikiContent({ content, title, onNavigate, onSourceClick, documen
           )
         }
         return (
-          <li className="my-0.5 leading-[1.7]" {...props}>
+          <li className="my-0.5 leading-[1.65]" {...props}>
             {children}
           </li>
         )
