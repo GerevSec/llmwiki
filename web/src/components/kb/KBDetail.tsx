@@ -17,8 +17,9 @@ import {
   UnsupportedViewer, ProcessingViewer, FailedViewer,
 } from '@/components/kb/DocViewers'
 import type { DocumentListItem, WikiNode, WikiSubsection } from '@/lib/types'
+import { getPublicEnv } from '@/lib/public-env'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_URL = getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
 
 const wikiPathCache = new Map<string, string>()
 
@@ -151,7 +152,7 @@ export function KBDetail({ kbId, kbName }: Props) {
   const searchParams = useSearchParams()
   const token = useUserStore((s) => s.accessToken)
   const userId = useUserStore((s) => s.user?.id)
-  const { documents, setDocuments, loading } = useKBDocuments(kbId)
+  const { documents, setDocuments, loading, refetchDocuments } = useKBDocuments(kbId)
 
   // Split documents into wiki and sources
   const wikiDocs = React.useMemo(
@@ -522,11 +523,12 @@ export function KBDetail({ kbId, kbName }: Props) {
     const t = getToken()
     if (!t) return
     try {
-      await apiFetch(`/v1/documents/${docId}`, t, {
+      const updated = await apiFetch<DocumentListItem>(`/v1/documents/${docId}`, t, {
         method: 'PATCH',
         body: JSON.stringify({ path: targetPath }),
       })
-      setDocuments((prev) => prev.map((d) => d.id === docId ? { ...d, path: targetPath } : d))
+      setDocuments((prev) => prev.map((d) => d.id === docId ? { ...d, ...updated } : d))
+      refetchDocuments()
     } catch {
       toast.error('Failed to move document')
     }
@@ -587,13 +589,14 @@ export function KBDetail({ kbId, kbName }: Props) {
           reject(error)
         },
         onSuccess: () => {
+          refetchDocuments()
           toast.success(`${file.name} uploaded, processing...`)
           resolve()
         },
       })
       upload.start()
     })
-  }, [kbId])
+  }, [kbId, refetchDocuments])
 
   const uploadFiles = React.useCallback((files: File[]) => {
     const t = getToken()
@@ -645,10 +648,15 @@ export function KBDetail({ kbId, kbName }: Props) {
 
   // File drag-and-drop
   const [fileDragOver, setFileDragOver] = React.useState(false)
+  const [sourceDragActive, setSourceDragActive] = React.useState(false)
   const dragCounterRef = React.useRef(0)
+  const isDocumentDrag = (types: readonly string[]) =>
+    sourceDragActive ||
+    types.includes('application/x-llmwiki-doc') ||
+    types.includes('application/x-llmwiki-item')
 
   const handleFileDragEnter = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes('application/x-llmwiki-item')) return
+    if (isDocumentDrag(e.dataTransfer.types)) return
     e.preventDefault()
     dragCounterRef.current++
     if (dragCounterRef.current === 1) setFileDragOver(true)
@@ -659,12 +667,16 @@ export function KBDetail({ kbId, kbName }: Props) {
     if (dragCounterRef.current === 0) setFileDragOver(false)
   }
   const handleFileDragOver = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes('application/x-llmwiki-item')) return
+    if (isDocumentDrag(e.dataTransfer.types)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
   }
   const handleFileDrop = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes('application/x-llmwiki-item')) return
+    if (isDocumentDrag(e.dataTransfer.types)) {
+      setFileDragOver(false)
+      dragCounterRef.current = 0
+      return
+    }
     e.preventDefault()
     dragCounterRef.current = 0
     setFileDragOver(false)
@@ -717,6 +729,7 @@ export function KBDetail({ kbId, kbName }: Props) {
             onDeleteDocument={handleDeleteDocument}
             onRenameDocument={handleRenameDocument}
             onMoveDocument={handleMoveDocument}
+            onSourceDragStateChange={setSourceDragActive}
             selectedIds={selectedIds}
             onSelect={handleSelect}
           />
@@ -804,4 +817,3 @@ export function KBDetail({ kbId, kbName }: Props) {
     </div>
   )
 }
-

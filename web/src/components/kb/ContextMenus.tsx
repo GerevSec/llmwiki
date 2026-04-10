@@ -32,8 +32,8 @@ function useContextMenuDismiss(open: boolean, onClose: () => void, menuRef: Reac
 }
 
 export function SourceContextMenu({
-  open, x, y, onRename, onDelete, onClose,
-}: ContextMenuProps & { onRename: () => void; onDelete: () => void }) {
+  open, x, y, onRename, onMove, onDelete, onClose,
+}: ContextMenuProps & { onRename: () => void; onMove: () => void; onDelete: () => void }) {
   const menuRef = React.useRef<HTMLDivElement>(null)
   useContextMenuDismiss(open, onClose, menuRef)
 
@@ -51,6 +51,13 @@ export function SourceContextMenu({
       >
         <Pencil className="size-3.5" />
         Rename
+      </button>
+      <button
+        onClick={onMove}
+        className="flex items-center gap-2 w-full rounded-sm px-2 py-1.5 text-sm hover:bg-accent cursor-pointer"
+      >
+        <Folder className="size-3.5" />
+        Move
       </button>
       <div className="h-px bg-border -mx-1 my-1" />
       <button

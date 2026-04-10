@@ -1,11 +1,15 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { getPublicEnv } from '@/lib/public-env'
+
+function getApiUrl() {
+  return getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
+}
 
 export async function apiFetch<T>(
   path: string,
   token: string,
   options?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${getApiUrl()}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',

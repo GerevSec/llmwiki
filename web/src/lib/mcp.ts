@@ -1,16 +1,26 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+import { getPublicEnv } from '@/lib/public-env'
+
 const DEFAULT_MCP_URL = 'http://localhost:8080/mcp'
 
-export const MCP_URL =
-  process.env.NEXT_PUBLIC_MCP_URL ||
-  (process.env.NEXT_PUBLIC_API_URL ? `${API_URL}/mcp` : DEFAULT_MCP_URL)
+function getApiUrl() {
+  return getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
+}
+
+function getMcpUrl() {
+  return (
+    getPublicEnv('NEXT_PUBLIC_MCP_URL') ||
+    (getPublicEnv('NEXT_PUBLIC_API_URL') ? `${getApiUrl()}/mcp` : DEFAULT_MCP_URL)
+  )
+}
+
+export const MCP_URL = getMcpUrl()
 
 export function buildOAuthMcpConfig(): string {
   return JSON.stringify(
     {
       mcpServers: {
         llmwiki: {
-          url: MCP_URL,
+          url: getMcpUrl(),
         },
       },
     },
@@ -24,7 +34,7 @@ export function buildApiKeyMcpConfig(apiKey: string): string {
     {
       mcpServers: {
         llmwiki: {
-          url: MCP_URL,
+          url: getMcpUrl(),
           headers: {
             Authorization: `Bearer ${apiKey}`,
           },

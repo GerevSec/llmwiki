@@ -2,7 +2,8 @@
 
 import { Suspense } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { useState } from 'react'
+import { getAuthErrorMessage, getAuthSettings } from '@/lib/supabase/auth-ui'
+import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
 function LoginForm() {
@@ -10,33 +11,80 @@ function LoginForm() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [googleLoading, setGoogleLoading] = useState(false)
+  const [googleEnabled, setGoogleEnabled] = useState(true)
   const router = useRouter()
   const searchParams = useSearchParams()
   const returnTo = searchParams.get('returnTo')
+
+  useEffect(() => {
+    let mounted = true
+
+    getAuthSettings()
+      .then((settings) => {
+        if (!mounted || !settings?.external) return
+        setGoogleEnabled(Boolean(settings.external.google))
+      })
+      .catch(() => {
+        if (!mounted) return
+        setGoogleEnabled(true)
+      })
+
+    return () => {
+      mounted = false
+    }
+  }, [])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
     setError('')
 
-    const supabase = createClient()
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) {
-      setError(error.message)
-      setLoading(false)
-    } else {
+    try {
+      const supabase = createClient()
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
+
+      if (error) {
+        throw error
+      }
+
       const dest = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/wikis'
       router.push(dest)
       router.refresh()
+    } catch (error) {
+      setError(getAuthErrorMessage(error))
+    } finally {
+      setLoading(false)
     }
   }
 
   async function handleGoogle() {
-    const supabase = createClient()
-    await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: `${window.location.origin}/callback` },
-    })
+    if (!googleEnabled) {
+      setError('Google sign-in is not configured for this deployment yet.')
+      return
+    }
+
+    setGoogleLoading(true)
+    setError('')
+
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: `${window.location.origin}/callback` },
+      })
+
+      if (error) {
+        throw error
+      }
+
+      if (!data.url) {
+        throw new Error('Google sign-in could not be started. Please try again.')
+      }
+    } catch (error) {
+      setError(getAuthErrorMessage(error))
+      setGoogleLoading(false)
+    }
   }
 
   return (
@@ -48,6 +96,7 @@ function LoginForm() {
 
         <button
           onClick={handleGoogle}
+          disabled={googleLoading || !googleEnabled}
           className="flex w-full items-center justify-center gap-3 rounded-lg border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-accent transition-colors"
         >
           <svg width="18" height="18" viewBox="0 0 24 24">
@@ -56,8 +105,13 @@ function LoginForm() {
             <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
             <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
           </svg>
-          Continue with Google
+          {googleLoading ? 'Redirecting to Google...' : 'Continue with Google'}
         </button>
+        {!googleEnabled && (
+          <p className="text-center text-sm text-muted-foreground">
+            Google sign-in is not configured for this deployment yet.
+          </p>
+        )}
 
         <div className="relative">
           <div className="absolute inset-0 flex items-center">
@@ -94,7 +148,7 @@ function LoginForm() {
           {error && <p className="text-sm text-destructive">{error}</p>}
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || googleLoading}
             className="w-full rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             {loading ? 'Signing in...' : 'Sign in'}

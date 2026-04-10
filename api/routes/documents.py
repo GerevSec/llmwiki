@@ -11,6 +11,12 @@ from pydantic import BaseModel
 from deps import get_scoped_db, get_user_id
 from scoped_db import ScopedDB
 from services.chunker import chunk_text, store_chunks
+from services.document_links import (
+    MARKDOWNISH_FILE_TYPES,
+    build_document_location,
+    rebase_relative_markdown_links,
+    rewrite_markdown_links_to_target,
+)
 
 router = APIRouter(tags=["documents"])
 
@@ -34,6 +40,17 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
     if not isinstance(meta, dict):
         return {}, content
     return meta, content[m.end():]
+
+
+def _normalize_path(path: str | None) -> str:
+    normalized = (path or "/").strip()
+    if not normalized:
+        return "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if not normalized.endswith("/"):
+        normalized += "/"
+    return re.sub(r"/+", "/", normalized)
 
 
 class CreateNote(BaseModel):
@@ -255,6 +272,57 @@ async def update_document_metadata(
 ):
     pool = request.app.state.pool
 
+    current = await pool.fetchrow(
+        "SELECT id, knowledge_base_id, user_id, filename, path, file_type, content "
+        "FROM documents WHERE id = $1 AND user_id = $2 AND archived = false",
+        doc_id, user_id,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    next_filename = body.filename if body.filename is not None else current["filename"]
+    next_path = _normalize_path(body.path) if body.path is not None else current["path"]
+    current_path = _normalize_path(current["path"])
+    location_changed = next_filename != current["filename"] or next_path != current_path
+
+    rewrites: list[tuple[str, str, str, str]] = []
+    if location_changed:
+        current_full_path = build_document_location(current_path, current["filename"])
+        next_full_path = build_document_location(next_path, next_filename)
+
+        docs_in_kb = await pool.fetch(
+            "SELECT id, knowledge_base_id, user_id, filename, path, file_type, content "
+            "FROM documents "
+            "WHERE knowledge_base_id = $1 AND archived = false",
+            current["knowledge_base_id"],
+        )
+
+        for doc in docs_in_kb:
+            if doc["file_type"] not in MARKDOWNISH_FILE_TYPES or not doc["content"]:
+                continue
+
+            if doc["id"] == current["id"]:
+                rewritten = rebase_relative_markdown_links(
+                    doc["content"],
+                    current_full_path,
+                    next_full_path,
+                )
+            else:
+                rewritten = rewrite_markdown_links_to_target(
+                    doc["content"],
+                    build_document_location(doc["path"], doc["filename"]),
+                    current_full_path,
+                    next_full_path,
+                )
+
+            if rewritten != doc["content"]:
+                rewrites.append((
+                    str(doc["id"]),
+                    rewritten,
+                    str(doc["user_id"]),
+                    str(doc["knowledge_base_id"]),
+                ))
+
     updates = []
     params = []
     idx = 1
@@ -265,7 +333,7 @@ async def update_document_metadata(
         idx += 1
     if body.path is not None:
         updates.append(f"path = ${idx}")
-        params.append(body.path)
+        params.append(next_path)
         idx += 1
     if body.title is not None:
         updates.append(f"title = ${idx}")
@@ -287,6 +355,8 @@ async def update_document_metadata(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    if location_changed:
+        updates.append("version = version + 1")
     updates.append("updated_at = now()")
     params.append(doc_id)
     params.append(user_id)
@@ -296,9 +366,34 @@ async def update_document_metadata(
         f"WHERE id = ${idx} AND user_id = ${idx + 1} "
         f"RETURNING {_DOC_COLUMNS}"
     )
-    row = await pool.fetchrow(sql, *params)
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found")
+    conn = await pool.acquire()
+    try:
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, *params)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+
+            for rewritten_doc_id, rewritten_content, rewritten_user_id, rewritten_kb_id in rewrites:
+                await conn.execute(
+                    "UPDATE documents "
+                    "SET content = $1, version = version + 1, updated_at = now() "
+                    "WHERE id = $2::uuid",
+                    rewritten_content, rewritten_doc_id,
+                )
+                await store_chunks(
+                    conn,
+                    rewritten_doc_id,
+                    rewritten_user_id,
+                    rewritten_kb_id,
+                    chunk_text(rewritten_content),
+                )
+            row = await conn.fetchrow(
+                f"SELECT {_DOC_COLUMNS} FROM documents WHERE id = $1",
+                doc_id,
+            )
+    finally:
+        await pool.release(conn)
+
     return dict(row)
 
 

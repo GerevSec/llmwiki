@@ -22,6 +22,7 @@ import { SidenavUserMenu } from '@/components/kb/SidenavUserMenu'
 import { apiFetch } from '@/lib/api'
 import { useUserStore } from '@/stores'
 import type { DocumentListItem, WikiNode, WikiSubsection } from '@/lib/types'
+import { parseBreadcrumbs } from '@/lib/utils/folders'
 
 interface Usage {
   total_pages: number
@@ -88,6 +89,29 @@ function buildSourceTree(docs: DocumentListItem[]): SourceNode[] {
   return root
 }
 
+function collectFolderPaths(docs: DocumentListItem[]): string[] {
+  const folders = new Set<string>(['/'])
+
+  for (const doc of docs) {
+    const normalized = doc.path === '/' ? '/' : `/${doc.path.split('/').filter(Boolean).join('/')}/`
+    folders.add(normalized)
+
+    if (normalized === '/') continue
+    const parts = normalized.split('/').filter(Boolean)
+    let prefix = '/'
+    for (const part of parts) {
+      prefix += `${part}/`
+      folders.add(prefix)
+    }
+  }
+
+  return Array.from(folders).sort((a, b) => {
+    if (a === '/') return -1
+    if (b === '/') return 1
+    return a.localeCompare(b)
+  })
+}
+
 interface KBSidenavProps {
   kbName: string
   wikiTree: WikiNode[]
@@ -106,6 +130,7 @@ interface KBSidenavProps {
   onDeleteDocument: (id: string) => void
   onRenameDocument: (id: string, newTitle: string) => void
   onMoveDocument: (docId: string, targetPath: string) => void
+  onSourceDragStateChange?: (dragging: boolean) => void
   selectedIds?: Set<string>
   onSelect?: (docId: string, e: React.MouseEvent) => void
 }
@@ -128,6 +153,7 @@ export function KBSidenav({
   onDeleteDocument,
   onRenameDocument,
   onMoveDocument,
+  onSourceDragStateChange,
   selectedIds = new Set(),
   onSelect,
 }: KBSidenavProps) {
@@ -152,10 +178,14 @@ export function KBSidenav({
   }
 
   const sourceTree = React.useMemo(() => buildSourceTree(sourceDocs), [sourceDocs])
+  const folderPaths = React.useMemo(() => collectFolderPaths(sourceDocs), [sourceDocs])
 
   const [folderDialogOpen, setFolderDialogOpen] = React.useState(false)
   const [folderName, setFolderName] = React.useState('')
   const [allSourcesOpen, setAllSourcesOpen] = React.useState(false)
+  const [moveDialogDoc, setMoveDialogDoc] = React.useState<DocumentListItem | null>(null)
+  const [moveTargetPath, setMoveTargetPath] = React.useState('/')
+  const [rootDragOver, setRootDragOver] = React.useState(false)
 
   const handleCreateFolder = () => {
     if (!folderName.trim()) return
@@ -163,6 +193,19 @@ export function KBSidenav({
     setFolderName('')
     setFolderDialogOpen(false)
   }
+
+  const openMoveDialog = React.useCallback((doc: DocumentListItem) => {
+    setMoveDialogDoc(doc)
+    setMoveTargetPath(doc.path || '/')
+  }, [])
+
+  const handleMoveConfirm = React.useCallback(() => {
+    if (!moveDialogDoc) return
+    if (moveTargetPath !== moveDialogDoc.path) {
+      onMoveDocument(moveDialogDoc.id, moveTargetPath)
+    }
+    setMoveDialogDoc(null)
+  }, [moveDialogDoc, moveTargetPath, onMoveDocument])
 
   const [areaContextOpen, setAreaContextOpen] = React.useState(false)
   const [areaContextPos, setAreaContextPos] = React.useState<{ x: number; y: number } | null>(null)
@@ -372,7 +415,26 @@ export function KBSidenav({
           </DropdownMenu>
         </div>
         {sourcesExpanded && (
-          <div className="flex-1 overflow-y-auto no-scrollbar mt-0.5">
+          <div
+            className={cn(
+              'flex-1 overflow-y-auto no-scrollbar mt-0.5 rounded-md transition-colors',
+              rootDragOver && 'bg-primary/5 ring-1 ring-primary/40',
+            )}
+            onDragOver={(e) => {
+              if (!e.dataTransfer.types.includes('application/x-llmwiki-doc')) return
+              e.preventDefault()
+              e.dataTransfer.dropEffect = 'move'
+              setRootDragOver(true)
+            }}
+            onDragLeave={() => setRootDragOver(false)}
+            onDrop={(e) => {
+              if (!e.dataTransfer.types.includes('application/x-llmwiki-doc')) return
+              e.preventDefault()
+              setRootDragOver(false)
+              const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
+              if (docId) onMoveDocument(docId, '/')
+            }}
+          >
             <div className="space-y-0.5">
               {loading ? (
                 <SidenavSkeleton lines={6} />
@@ -388,6 +450,8 @@ export function KBSidenav({
                     onDelete={onDeleteDocument}
                     onRename={onRenameDocument}
                     onMove={onMoveDocument}
+                    onRequestMove={openMoveDialog}
+                    onSourceDragStateChange={onSourceDragStateChange}
                     selectedIds={selectedIds}
                     onMultiSelect={onSelect}
                   />
@@ -459,6 +523,59 @@ export function KBSidenav({
               className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 cursor-pointer"
             >
               Create
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!moveDialogDoc} onOpenChange={(open) => !open && setMoveDialogDoc(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move source</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Move <span className="font-medium text-foreground">{moveDialogDoc?.title || moveDialogDoc?.filename}</span> to:
+            </p>
+            <div className="max-h-72 overflow-y-auto rounded-md border border-border p-1">
+              {folderPaths.map((path) => {
+                const breadcrumbs = parseBreadcrumbs(path)
+                const label = path === '/'
+                  ? 'Root'
+                  : breadcrumbs.map((crumb) => crumb.label).join(' / ')
+                return (
+                  <button
+                    key={path}
+                    type="button"
+                    onClick={() => setMoveTargetPath(path)}
+                    className={cn(
+                      'flex w-full items-center rounded-sm px-2 py-1.5 text-sm text-left transition-colors cursor-pointer',
+                      moveTargetPath === path
+                        ? 'bg-accent text-foreground'
+                        : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                    )}
+                  >
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => setMoveDialogDoc(null)}
+              className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleMoveConfirm}
+              disabled={!moveDialogDoc || moveTargetPath === moveDialogDoc.path}
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 cursor-pointer"
+            >
+              Move
             </button>
           </DialogFooter>
         </DialogContent>
@@ -620,6 +737,8 @@ function SourceTreeNode({
   onDelete,
   onRename,
   onMove,
+  onRequestMove,
+  onSourceDragStateChange,
   selectedIds = new Set(),
   onMultiSelect,
 }: {
@@ -631,6 +750,8 @@ function SourceTreeNode({
   onDelete: (id: string) => void
   onRename: (id: string, newTitle: string) => void
   onMove: (docId: string, targetPath: string) => void
+  onRequestMove: (doc: DocumentListItem) => void
+  onSourceDragStateChange?: (dragging: boolean) => void
   selectedIds?: Set<string>
   onMultiSelect?: (docId: string, e: React.MouseEvent) => void
 }) {
@@ -709,6 +830,8 @@ function SourceTreeNode({
                 onDelete={onDelete}
                 onRename={onRename}
                 onMove={onMove}
+                onRequestMove={onRequestMove}
+                onSourceDragStateChange={onSourceDragStateChange}
                 selectedIds={selectedIds}
                 onMultiSelect={onMultiSelect}
               />
@@ -752,9 +875,12 @@ function SourceTreeNode({
       onDragStart={(e) => {
         if (node.doc) {
           e.dataTransfer.setData('application/x-llmwiki-doc', node.doc.id)
+          e.dataTransfer.setData('application/x-llmwiki-item', node.doc.id)
           e.dataTransfer.effectAllowed = 'move'
+          onSourceDragStateChange?.(true)
         }
       }}
+      onDragEnd={() => onSourceDragStateChange?.(false)}
       className={cn(
         'flex items-center gap-1.5 w-full text-left text-xs rounded-md px-2 py-1 transition-colors cursor-pointer group',
         isMultiSelected
@@ -798,6 +924,10 @@ function SourceTreeNode({
         x={contextPos?.x ?? 0}
         y={contextPos?.y ?? 0}
         onRename={() => { setContextOpen(false); startRename() }}
+        onMove={() => {
+          setContextOpen(false)
+          if (node.doc) onRequestMove(node.doc)
+        }}
         onDelete={() => { setContextOpen(false); node.doc && onDelete(node.doc.id) }}
         onClose={() => setContextOpen(false)}
       />
@@ -875,4 +1005,3 @@ function PageUsageBar() {
     </>
   )
 }
-

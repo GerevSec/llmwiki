@@ -12,7 +12,7 @@ function OAuthConsentContent() {
 
   const [details, setDetails] = React.useState<{
     client?: { name?: string }
-    scopes?: string[]
+    scope?: string
   } | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -38,9 +38,16 @@ function OAuthConsentContent() {
       try {
         const { data, error: fetchError } = await (supabase.auth as any).oauth.getAuthorizationDetails(authorizationId)
         if (fetchError) throw fetchError
+
+        if (data && 'redirect_url' in data && data.redirect_url) {
+          window.location.href = data.redirect_url
+          return
+        }
+
         setDetails(data)
       } catch (err: any) {
         console.error('Failed to get authorization details:', err)
+        setError(err?.message || 'Failed to get authorization details.')
       } finally {
         setLoading(false)
       }
@@ -55,7 +62,8 @@ function OAuthConsentContent() {
       const supabase = createClient()
       const result = await (supabase.auth as any).oauth.approveAuthorization(authorizationId)
       if (result.error) throw result.error
-      const redirectUrl = result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
+      const redirectUrl =
+        result.data?.redirect_url || result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
       if (redirectUrl) {
         window.location.href = redirectUrl
       } else {
@@ -76,7 +84,8 @@ function OAuthConsentContent() {
       const supabase = createClient()
       const result = await (supabase.auth as any).oauth.denyAuthorization(authorizationId)
       if (result.error) throw result.error
-      const redirectUrl = result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
+      const redirectUrl =
+        result.data?.redirect_url || result.data?.redirect_to || result.data?.redirect_uri || result.data?.url
       if (redirectUrl) {
         window.location.href = redirectUrl
       } else {

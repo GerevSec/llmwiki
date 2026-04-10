@@ -11,6 +11,18 @@ export function useKBDocuments(knowledgeBaseId: string) {
   const [documents, setDocuments] = React.useState<DocumentListItem[]>([])
   const [loading, setLoading] = React.useState(true)
   const supabase = React.useMemo(() => createClient(), [])
+  const upsertDocument = React.useCallback((item: DocumentListItem, prepend = false) => {
+    setDocuments((prev) => {
+      const idx = prev.findIndex((doc) => doc.id === item.id)
+      if (idx === -1) {
+        return prepend ? [item, ...prev] : [...prev, item]
+      }
+
+      const next = [...prev]
+      next[idx] = item
+      return next
+    })
+  }, [])
 
   React.useEffect(() => {
     if (!knowledgeBaseId) {
@@ -63,16 +75,17 @@ export function useKBDocuments(knowledgeBaseId: string) {
           if (payload.eventType === 'INSERT') {
             const id = (payload.new as { id: string }).id
             const item = await fetchDoc(id)
-            if (!item) return
-            setDocuments((prev) => {
-              if (prev.some((d) => d.id === item.id)) return prev
-              return [item, ...prev]
-            })
+            const fallback = payload.new as DocumentListItem
+            const nextItem = item ?? fallback
+            if (!nextItem?.id) return
+            upsertDocument(nextItem, true)
           } else if (payload.eventType === 'UPDATE') {
             const id = (payload.new as { id: string }).id
             const item = await fetchDoc(id)
-            if (!item) return
-            setDocuments((prev) => prev.map((d) => d.id === item.id ? item : d))
+            const fallback = payload.new as DocumentListItem
+            const nextItem = item ?? fallback
+            if (!nextItem?.id) return
+            upsertDocument(nextItem)
           } else if (payload.eventType === 'DELETE') {
             const id = (payload.old as { id: string }).id
             setDocuments((prev) => prev.filter((d) => d.id !== id))
@@ -84,7 +97,7 @@ export function useKBDocuments(knowledgeBaseId: string) {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [knowledgeBaseId, supabase])
+  }, [knowledgeBaseId, supabase, upsertDocument])
 
   const refetchDocuments = React.useCallback(() => {
     supabase

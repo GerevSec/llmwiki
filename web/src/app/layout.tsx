@@ -71,6 +71,7 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{ __html: themeScript }}
           suppressHydrationWarning
         />
+        <script src="/public-env.js" suppressHydrationWarning />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
