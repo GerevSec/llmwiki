@@ -5,6 +5,7 @@ import jwt as pyjwt
 from jwt import PyJWKClient
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 
+from api_key_auth import verify_api_key_token
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,16 @@ def _get_jwks_client() -> PyJWKClient:
 class SupabaseTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        api_key_user_id = await verify_api_key_token(token)
+        if api_key_user_id:
+            logger.info("MCP auth via API key: %s", api_key_user_id)
+            return AccessToken(
+                token=token,
+                client_id=api_key_user_id,
+                scopes=[],
+                extra={"claims": {"sub": api_key_user_id, "aud": "authenticated", "role": "authenticated"}},
+            )
+
         try:
             signing_key = await asyncio.to_thread(
                 _get_jwks_client().get_signing_key_from_jwt, token

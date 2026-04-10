@@ -4,12 +4,13 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from config import settings
 from deps import get_scoped_db, get_user_id
 from scoped_db import ScopedDB
+from services.periodic_compile import CompileTarget, filter_pending_sources, run_target
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 
@@ -45,6 +46,30 @@ class KnowledgeBaseOut(BaseModel):
     wiki_page_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class CompileNowOut(BaseModel):
+    knowledge_base: str
+    status: str
+    source_count: int
+    stop_reason: str | None = None
+    request_id: str | None = None
+
+
+class CompilePreviewOut(BaseModel):
+    knowledge_base: str
+    pending_source_count: int
+
+
+class CompileRunOut(BaseModel):
+    id: UUID
+    status: str
+    model: str
+    source_count: int
+    response_excerpt: str | None = None
+    error_message: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
 
 
 def _slugify(name: str) -> str:
@@ -102,6 +127,115 @@ async def get_knowledge_base(
     if not row:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     return row
+
+
+@router.get("/{kb_id}/compile-preview", response_model=CompilePreviewOut)
+async def get_compile_preview(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    kb = await pool.fetchrow(
+        "SELECT id::text AS id, slug FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+        kb_id,
+        user_id,
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    checkpoint_rows = await pool.fetch(
+        "SELECT document_id::text AS document_id, compiled_version "
+        "FROM compiled_source_checkpoints WHERE knowledge_base_id = $1::uuid",
+        kb["id"],
+    )
+    checkpoints = {row["document_id"]: row["compiled_version"] for row in checkpoint_rows}
+
+    document_rows = [
+        dict(row)
+        for row in await pool.fetch(
+            "SELECT id::text AS id, path, filename, COALESCE(title, filename) AS title, "
+            "status, archived, version, updated_at "
+            "FROM documents WHERE knowledge_base_id = $1::uuid",
+            kb["id"],
+        )
+    ]
+    pending = filter_pending_sources(
+        document_rows,
+        checkpoints,
+        settings.LLMWIKI_COMPILE_MAX_SOURCES,
+    )
+    return {
+        "knowledge_base": kb["slug"],
+        "pending_source_count": len(pending),
+    }
+
+
+@router.get("/{kb_id}/compile-runs", response_model=list[CompileRunOut])
+async def list_compile_runs(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+    limit: int = Query(10, ge=1, le=50),
+):
+    pool = request.app.state.pool
+    kb = await pool.fetchrow(
+        "SELECT id FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+        kb_id,
+        user_id,
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    rows = await pool.fetch(
+        "SELECT id, status, model, source_count, response_excerpt, error_message, started_at, finished_at "
+        "FROM compile_runs WHERE knowledge_base_id = $1 ORDER BY started_at DESC LIMIT $2",
+        kb_id,
+        limit,
+    )
+    return [dict(row) for row in rows]
+
+
+@router.post("/{kb_id}/compile-now", response_model=CompileNowOut)
+async def compile_knowledge_base_now(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    if not settings.ANTHROPIC_API_KEY or not settings.ANTHROPIC_MODEL:
+        raise HTTPException(
+            status_code=503,
+            detail="Periodic compile is not configured on the server.",
+        )
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    access_token = auth_header.removeprefix("Bearer ").strip()
+    pool = request.app.state.pool
+    kb = await pool.fetchrow(
+        "SELECT slug FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+        kb_id,
+        user_id,
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    target = CompileTarget(
+        knowledge_base=kb["slug"],
+        mcp_auth_token=access_token,
+        mcp_url=settings.MCP_URL,
+        prompt=settings.LLMWIKI_COMPILE_PROMPT,
+        max_sources=settings.LLMWIKI_COMPILE_MAX_SOURCES,
+    )
+
+    try:
+        result = await run_target(pool, target)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return result
 
 
 # ── Write routes (service role via pool) ──

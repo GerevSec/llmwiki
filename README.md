@@ -131,6 +131,60 @@ npm run dev
 2. Add a custom connector pointing to `http://localhost:8080/mcp`
 3. Sign in with your Supabase account when prompted
 
+### Periodic Compile on Railway
+
+You can automate the same Claude-driven compile workflow with a Railway cron job.
+
+This repo now includes an unattended compiler command in `api/compile_once.py` that:
+
+1. finds sources that are new or changed since the last successful compile
+2. calls Claude through the Anthropic Messages API
+3. connects Claude to the existing LLM Wiki MCP server
+4. records compile runs plus per-source checkpoints so unchanged files are skipped on later runs
+
+#### Required environment
+
+Set these on the service or cron job that will run the compiler:
+
+```bash
+DATABASE_URL=postgresql://...
+MCP_URL=https://your-mcp-service.up.railway.app/mcp
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=...
+LLMWIKI_COMPILE_KB=your-kb-slug
+LLMWIKI_COMPILE_MCP_TOKEN=sv_your_llmwiki_api_key
+LLMWIKI_COMPILE_MAX_SOURCES=10
+```
+
+Optional:
+
+```bash
+LLMWIKI_COMPILE_PROMPT=Prefer compact updates and refresh overview/log every run.
+LLMWIKI_COMPILE_TARGETS_JSON=[{"knowledge_base":"kb-a","mcp_auth_token":"sv_...","mcp_url":"https://.../mcp"}]
+LLMWIKI_COMPILE_DRY_RUN=true
+```
+
+#### Authentication
+
+The MCP server now accepts LLM Wiki API keys (`sv_...`) as bearer tokens for unattended jobs. Create one through the existing API key endpoint and pass it as `LLMWIKI_COMPILE_MCP_TOKEN`.
+
+#### Railway setup
+
+Railway supports cron jobs as a compute type in its current docs. Point the cron job at the API image/repo and use this command:
+
+```bash
+python compile_once.py
+```
+
+Use a schedule like every 30 or 60 minutes depending on how often you expect new sources.
+
+#### Tracking behavior
+
+- Run history is stored in `compile_runs`
+- Per-source checkpoints are stored in `compiled_source_checkpoints`
+- A source is recompiled only when its `documents.version` changes
+- Only ready, non-archived, non-`/wiki/` documents are eligible
+
 #### Environment Variables
 
 **API** (`api/.env`)

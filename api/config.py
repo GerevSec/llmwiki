@@ -21,6 +21,18 @@ class Settings(BaseSettings):
     STAGE: str = "dev"
     APP_URL: str = "http://localhost:3000"
     API_URL: str = "http://localhost:8000"
+    MCP_URL: str = "http://localhost:8080/mcp"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = ""
+    ANTHROPIC_MAX_TOKENS: int = 4096
+    LLMWIKI_COMPILE_KB: str = ""
+    LLMWIKI_COMPILE_MCP_TOKEN: str = ""
+    LLMWIKI_COMPILE_PROMPT: str = ""
+    LLMWIKI_COMPILE_MAX_SOURCES: int = 10
+    LLMWIKI_COMPILE_TARGETS_JSON: str = ""
+    LLMWIKI_COMPILE_TIMEOUT_SECONDS: int = 300
+    LLMWIKI_COMPILE_MAX_CONTINUATIONS: int = 2
+    LLMWIKI_COMPILE_DRY_RUN: bool = False
 
     QUOTA_MAX_PAGES: int = 500  # per-user page limit (free tier)
     QUOTA_MAX_PAGES_PER_DOC: int = 300  # max pages per single document
