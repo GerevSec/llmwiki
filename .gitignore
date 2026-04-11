@@ -38,3 +38,6 @@ package-lock.json
 .netlify
 nvidia-10k-first20.md
 .omx/
+
+# db
+db
