@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import time
 import urllib.request
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -130,10 +131,16 @@ def _build_auth_metadata() -> dict:
     return upstream
 
 
-_cached_auth_metadata = _build_auth_metadata()
+_AUTH_METADATA_TTL_SECONDS = 60
+_cached_auth_metadata: dict = _build_auth_metadata()
+_cached_auth_metadata_at: float = time.monotonic()
 
 
 async def authorization_server_metadata(request):
+    global _cached_auth_metadata, _cached_auth_metadata_at
+    if time.monotonic() - _cached_auth_metadata_at > _AUTH_METADATA_TTL_SECONDS:
+        _cached_auth_metadata = _build_auth_metadata()
+        _cached_auth_metadata_at = time.monotonic()
     return JSONResponse(_cached_auth_metadata)
 
 
