@@ -15,6 +15,7 @@ class UsageResponse(BaseModel):
     document_count: int
     max_pages: int
     max_storage_bytes: int
+    page_limits_enabled: bool
 
 
 @router.get("/v1/usage", response_model=UsageResponse)
@@ -44,4 +45,5 @@ async def get_usage(
         document_count=row["document_count"],
         max_pages=limits["page_limit"] if limits else settings.QUOTA_MAX_PAGES,
         max_storage_bytes=limits["storage_limit_bytes"] if limits else settings.QUOTA_MAX_STORAGE_BYTES,
+        page_limits_enabled=settings.OCR_PAGE_LIMITS_ENABLED,
     )

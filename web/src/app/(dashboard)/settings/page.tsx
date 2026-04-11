@@ -20,16 +20,7 @@ interface Usage {
   document_count: number
   max_pages: number
   max_storage_bytes: number
-}
-
-interface Invite {
-  id: string
-  email: string
-  role: string
-  status: string
-  expires_at: string
-  created_at: string
-  token?: string | null
+  page_limits_enabled: boolean
 }
 
 interface Member {
@@ -151,7 +142,6 @@ function ScheduleCard({
   pendingCount,
   runs,
   members,
-  invites,
   saving,
   running,
   deleting,
@@ -168,7 +158,6 @@ function ScheduleCard({
   pendingCount: number | undefined
   runs: CompileRun[]
   members: Member[]
-  invites: Invite[]
   saving: boolean
   running: boolean
   deleting: boolean
@@ -234,7 +223,7 @@ function ScheduleCard({
           <section className="rounded-md border border-border/60 p-3 space-y-3">
             <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Collaboration</div>
             <p className="text-xs text-muted-foreground">
-              Invites are email-bound. Existing users will see them in Settings right away; new users can sign up with the same email later and accept then.
+              Add existing users by email. They are added immediately and the wiki appears in their list with the assigned role.
             </p>
             <div className="space-y-2">
               {members.map((member) => (
@@ -265,7 +254,7 @@ function ScheduleCard({
               ))}
             </div>
             <div className="space-y-2 rounded-md border border-dashed border-border p-3">
-              <div className="text-xs text-muted-foreground">Invite collaborator</div>
+              <div className="text-xs text-muted-foreground">Add existing collaborator</div>
               <input
                 value={inviteEmail}
                 onChange={(e) => setInviteEmail(e.target.value)}
@@ -291,18 +280,9 @@ function ScheduleCard({
                   disabled={!inviteEmail.trim()}
                   className="rounded-md border border-border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50 cursor-pointer"
                 >
-                  Send invite
+                  Add collaborator
                 </button>
               </div>
-              {invites.length > 0 && (
-                <div className="space-y-1 pt-2">
-                  {invites.map((invite) => (
-                    <div key={invite.id} className="text-xs text-muted-foreground">
-                      {invite.email} · {invite.role} · {invite.status}
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           </section>
 
@@ -483,22 +463,19 @@ export default function SettingsPage() {
   const [compileRuns, setCompileRuns] = React.useState<Record<string, CompileRun[]>>({})
   const [schedules, setSchedules] = React.useState<Record<string, CompileSchedule>>({})
   const [membersByKb, setMembersByKb] = React.useState<Record<string, Member[]>>({})
-  const [invitesByKb, setInvitesByKb] = React.useState<Record<string, Invite[]>>({})
-  const [pendingInvites, setPendingInvites] = React.useState<Invite[]>([])
   const oauthConfigJson = buildOAuthMcpConfig()
 
   React.useEffect(() => {
     if (!token) return
     fetchKBs().catch(() => {})
     apiFetch<Usage>('/v1/usage', token).then(setUsage).catch(() => {})
-    apiFetch<Invite[]>('/v1/knowledge-bases/invites/pending', token).then(setPendingInvites).catch(() => {})
   }, [token, fetchKBs])
 
   React.useEffect(() => {
     if (!token || kbLoading || knowledgeBases.length === 0) return
     const adminKbs = knowledgeBases.filter((kb) => ADMIN_ROLES.has(kb.role))
     Promise.all(adminKbs.map(async (kb) => {
-      const [preview, runs, schedule, members, invites] = await Promise.all([
+      const [preview, runs, schedule, members] = await Promise.all([
         apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
         apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
         apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token).catch(() => ({
@@ -518,15 +495,13 @@ export default function SettingsPage() {
           next_run_at: null,
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
-        apiFetch<Invite[]>(`/v1/knowledge-bases/${kb.id}/invites`, token).catch(() => []),
       ])
-      return { kbId: kb.id, preview, runs, schedule, members, invites }
+      return { kbId: kb.id, preview, runs, schedule, members }
     })).then((results) => {
       setPendingCounts(Object.fromEntries(results.map((r) => [r.kbId, r.preview.pending_source_count])))
       setCompileRuns(Object.fromEntries(results.map((r) => [r.kbId, r.runs])))
       setSchedules(Object.fromEntries(results.map((r) => [r.kbId, r.schedule])))
       setMembersByKb(Object.fromEntries(results.map((r) => [r.kbId, r.members])))
-      setInvitesByKb(Object.fromEntries(results.map((r) => [r.kbId, r.invites])))
     }).catch(() => {})
   }, [token, kbLoading, knowledgeBases])
 
@@ -546,18 +521,16 @@ export default function SettingsPage() {
 
   const refreshKbAdminData = async (kb: KnowledgeBase) => {
     if (!token || !ADMIN_ROLES.has(kb.role)) return
-    const [preview, runs, schedule, members, invites] = await Promise.all([
+    const [preview, runs, schedule, members] = await Promise.all([
       apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
       apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
       apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token),
       apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token),
-      apiFetch<Invite[]>(`/v1/knowledge-bases/${kb.id}/invites`, token).catch(() => []),
     ])
     setPendingCounts((prev) => ({ ...prev, [kb.id]: preview.pending_source_count }))
     setCompileRuns((prev) => ({ ...prev, [kb.id]: runs }))
     setSchedules((prev) => ({ ...prev, [kb.id]: schedule }))
     setMembersByKb((prev) => ({ ...prev, [kb.id]: members }))
-    setInvitesByKb((prev) => ({ ...prev, [kb.id]: invites }))
   }
 
   const handleCompileNow = async (kbId: string, kbName: string) => {
@@ -609,14 +582,14 @@ export default function SettingsPage() {
     if (!token) return
     if (!email.trim()) return
     try {
-      const invite = await apiFetch<Invite>(`/v1/knowledge-bases/${kbId}/invites`, token, {
+      const member = await apiFetch<Member>(`/v1/knowledge-bases/${kbId}/invites`, token, {
         method: 'POST',
         body: JSON.stringify({ email, role }),
       })
-      setInvitesByKb((prev) => ({ ...prev, [kbId]: [invite, ...(prev[kbId] || [])] }))
-      toast.success(`Invite created. Token: ${invite.token ?? 'hidden'}`)
+      setMembersByKb((prev) => ({ ...prev, [kbId]: [...(prev[kbId] || []), member] }))
+      toast.success(`Added ${member.display_name || member.email || 'collaborator'} to the wiki`)
     } catch (err) {
-      toast.error((err as Error).message || 'Failed to create invite')
+      toast.error((err as Error).message || 'Failed to add collaborator')
     }
   }
 
@@ -645,21 +618,6 @@ export default function SettingsPage() {
       toast.success('Member removed')
     } catch (err) {
       toast.error((err as Error).message || 'Failed to remove member')
-    }
-  }
-
-  const handleAcceptInvite = async (inviteId: string) => {
-    if (!token) return
-    try {
-      await apiFetch('/v1/knowledge-bases/invites/accept', token, {
-        method: 'POST',
-        body: JSON.stringify({ invite_id: inviteId }),
-      })
-      setPendingInvites((prev) => prev.filter((item) => item.id !== inviteId))
-      await fetchKBs()
-      toast.success('Invite accepted')
-    } catch (err) {
-      toast.error((err as Error).message || 'Failed to accept invite')
     }
   }
 
@@ -705,6 +663,7 @@ export default function SettingsPage() {
                 <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, (usage.total_storage_bytes / usage.max_storage_bytes) * 100)}%` }} />
               </div>
             </div>
+            {usage.page_limits_enabled && (
             <div>
               <div className="flex items-center justify-between text-sm mb-1.5">
                 <span className="text-muted-foreground">OCR Pages</span>
@@ -714,6 +673,7 @@ export default function SettingsPage() {
                 <div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, (usage.total_pages / usage.max_pages) * 100)}%` }} />
               </div>
             </div>
+            )}
           </div>
         </section>
       )}
@@ -733,23 +693,6 @@ export default function SettingsPage() {
         <p className="mt-3 text-xs text-muted-foreground">MCP URL: <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">{MCP_URL}</code></p>
       </section>
 
-      {pendingInvites.length > 0 && (
-        <section>
-          <h2 className="text-base font-medium">Pending invitations</h2>
-          <div className="mt-3 space-y-2">
-            {pendingInvites.map((invite) => (
-              <div key={invite.id} className="flex items-center justify-between rounded-lg border border-border px-4 py-3">
-                <div>
-                  <div className="text-sm font-medium">{invite.email}</div>
-                  <div className="text-xs text-muted-foreground">Role: {invite.role} · Expires {new Date(invite.expires_at).toLocaleString()}</div>
-                </div>
-                <button onClick={() => handleAcceptInvite(invite.id)} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-accent cursor-pointer">Accept</button>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       <section>
         <h2 className="text-base font-medium">Knowledge bases</h2>
         <div className="mt-4 space-y-4">
@@ -761,7 +704,6 @@ export default function SettingsPage() {
               pendingCount={pendingCounts[kb.id]}
               runs={compileRuns[kb.id] || []}
               members={membersByKb[kb.id] || []}
-              invites={invitesByKb[kb.id] || []}
               saving={savingScheduleKbId === kb.id}
               running={runningKbId === kb.id}
               deleting={deletingKbId === kb.id}

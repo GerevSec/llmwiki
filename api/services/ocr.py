@@ -37,6 +37,8 @@ class OCRService:
     async def _check_global_limits(self, document_id: str):
         if not settings.GLOBAL_OCR_ENABLED:
             raise ValueError("OCR processing is temporarily disabled by the administrator.")
+        if not settings.OCR_PAGE_LIMITS_ENABLED:
+            return
 
         total_pages = await self._pool.fetchval(
             "SELECT COALESCE(SUM(page_count), 0) FROM documents WHERE NOT archived"
@@ -124,21 +126,22 @@ class OCRService:
             )
             page_limit = user_limits["page_limit"] if user_limits else settings.QUOTA_MAX_PAGES
 
-            if num_pages > settings.QUOTA_MAX_PAGES_PER_DOC:
+            if settings.OCR_PAGE_LIMITS_ENABLED and num_pages > settings.QUOTA_MAX_PAGES_PER_DOC:
                 raise ValueError(
                     f"Document has {num_pages} pages, maximum is {settings.QUOTA_MAX_PAGES_PER_DOC}."
                 )
 
-            current_pages = await self._pool.fetchval(
-                "SELECT COALESCE(SUM(page_count), 0) FROM documents "
-                "WHERE user_id = $1 AND id != $2",
-                user_id, document_id,
-            )
-            if current_pages + num_pages > page_limit:
-                raise ValueError(
-                    f"Page quota exceeded: {current_pages} existing + {num_pages} new "
-                    f"exceeds your limit of {page_limit} pages."
+            if settings.OCR_PAGE_LIMITS_ENABLED:
+                current_pages = await self._pool.fetchval(
+                    "SELECT COALESCE(SUM(page_count), 0) FROM documents "
+                    "WHERE user_id = $1 AND id != $2",
+                    user_id, document_id,
                 )
+                if current_pages + num_pages > page_limit:
+                    raise ValueError(
+                        f"Page quota exceeded: {current_pages} existing + {num_pages} new "
+                        f"exceeds your limit of {page_limit} pages."
+                    )
 
         conn = await self._pool.acquire()
         try:
@@ -326,7 +329,7 @@ class OCRService:
 
         pages = ocr_result.get("pages", [])
 
-        if len(pages) > settings.QUOTA_MAX_PAGES_PER_DOC:
+        if settings.OCR_PAGE_LIMITS_ENABLED and len(pages) > settings.QUOTA_MAX_PAGES_PER_DOC:
             raise ValueError(
                 f"Document has {len(pages)} pages, maximum is {settings.QUOTA_MAX_PAGES_PER_DOC}."
             )
@@ -342,7 +345,7 @@ class OCRService:
             "WHERE user_id = $1 AND id != $2",
             user_id, document_id,
         )
-        if current_pages + len(pages) > page_limit:
+        if settings.OCR_PAGE_LIMITS_ENABLED and current_pages + len(pages) > page_limit:
             raise ValueError(
                 f"Page quota exceeded: {current_pages} existing + {len(pages)} new "
                 f"exceeds your limit of {page_limit} pages."

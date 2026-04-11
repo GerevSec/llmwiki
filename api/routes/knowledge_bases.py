@@ -1,7 +1,6 @@
-import hashlib
 import re
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -12,7 +11,7 @@ from config import settings
 from deps import get_scoped_db, get_user_id
 from scoped_db import ScopedDB
 from services.encryption import decrypt_secret, encrypt_secret
-from services.kb_access import ADMIN_ROLES, get_kb_for_member, get_user_email, require_kb_role
+from services.kb_access import ADMIN_ROLES, get_kb_for_member, require_kb_role
 from services.periodic_compile import (
     CompileTarget,
     default_compile_provider,
@@ -55,11 +54,6 @@ class InviteCreate(BaseModel):
     role: str
 
 
-class InviteAccept(BaseModel):
-    token: str | None = None
-    invite_id: str | None = None
-
-
 class MembershipUpdate(BaseModel):
     role: str
 
@@ -95,16 +89,6 @@ class MembershipOut(BaseModel):
     display_name: str | None = None
     role: str
     created_at: datetime
-
-
-class InviteOut(BaseModel):
-    id: UUID
-    email: str
-    role: str
-    status: str
-    expires_at: datetime
-    created_at: datetime
-    token: str | None = None
 
 
 class CompileNowOut(BaseModel):
@@ -147,10 +131,6 @@ class KnowledgeBaseSettingsOut(BaseModel):
     last_status: str | None = None
     last_error: str | None = None
     next_run_at: datetime | None = None
-
-
-def _hash_invite_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _slugify(name: str) -> str:
@@ -221,72 +201,24 @@ async def get_knowledge_base(
     return row
 
 
-@router.get("/invites/pending", response_model=list[InviteOut])
+@router.get("/invites/pending", response_model=list[dict])
 async def list_pending_knowledge_base_invites(
     user_id: Annotated[str, Depends(get_user_id)],
     request: Request,
 ):
-    pool = request.app.state.pool
-    email = await get_user_email(pool, user_id)
-    if not email:
-        return []
-    rows = await pool.fetch(
-        "SELECT id, email, role, status, expires_at, created_at "
-        "FROM knowledge_base_invites "
-        "WHERE lower(email) = lower($1) AND status = 'pending' "
-        "ORDER BY created_at DESC",
-        email,
-    )
-    return [dict(row) for row in rows]
+    return []
 
 
 @router.post("/invites/accept", response_model=KnowledgeBaseOut)
 async def accept_knowledge_base_invite(
-    body: InviteAccept,
+    body: dict,
     user_id: Annotated[str, Depends(get_user_id)],
     request: Request,
 ):
-    pool = request.app.state.pool
-    conn = await pool.acquire()
-    try:
-        async with conn.transaction():
-            if body.invite_id:
-                invite = await conn.fetchrow(
-                    "SELECT id, knowledge_base_id, email, role, status, expires_at "
-                    "FROM knowledge_base_invites WHERE id = $1::uuid",
-                    body.invite_id,
-                )
-            elif body.token:
-                invite = await conn.fetchrow(
-                    "SELECT id, knowledge_base_id, email, role, status, expires_at "
-                    "FROM knowledge_base_invites WHERE token_hash = $1",
-                    _hash_invite_token(body.token),
-                )
-            else:
-                raise HTTPException(status_code=400, detail="invite_id or token is required")
-            if not invite or invite["status"] != "pending" or invite["expires_at"] < datetime.now(UTC):
-                raise HTTPException(status_code=404, detail="Invite not found or expired")
-
-            user_email = await conn.fetchval("SELECT email FROM users WHERE id = $1", user_id)
-            if (user_email or "").lower() != invite["email"]:
-                raise HTTPException(status_code=403, detail="Invite email does not match current user")
-
-            await conn.execute(
-                "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT (knowledge_base_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = now()",
-                invite["knowledge_base_id"],
-                user_id,
-                invite["role"],
-            )
-            await conn.execute(
-                "UPDATE knowledge_base_invites SET status = 'accepted', accepted_at = now(), updated_at = now() WHERE id = $1",
-                invite["id"],
-            )
-            row = await conn.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", invite["knowledge_base_id"], user_id)
-    finally:
-        await pool.release(conn)
-    return dict(row)
+    raise HTTPException(
+        status_code=410,
+        detail="Invite acceptance is no longer used. KB admins now add existing users directly by email.",
+    )
 
 
 @router.get("/{kb_id}/members", response_model=list[MembershipOut])
@@ -364,7 +296,7 @@ async def remove_knowledge_base_member(
         raise HTTPException(status_code=404, detail="Member not found")
 
 
-@router.get("/{kb_id}/invites", response_model=list[InviteOut])
+@router.get("/{kb_id}/invites", response_model=list[dict])
 async def list_knowledge_base_invites(
     kb_id: UUID,
     user_id: Annotated[str, Depends(get_user_id)],
@@ -375,15 +307,10 @@ async def list_knowledge_base_invites(
         await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
-    rows = await pool.fetch(
-        "SELECT id, email, role, status, expires_at, created_at "
-        "FROM knowledge_base_invites WHERE knowledge_base_id = $1 ORDER BY created_at DESC",
-        kb_id,
-    )
-    return [dict(row) for row in rows]
+    return []
 
 
-@router.post("/{kb_id}/invites", response_model=InviteOut, status_code=201)
+@router.post("/{kb_id}/invites", response_model=MembershipOut, status_code=201)
 async def create_knowledge_base_invite(
     kb_id: UUID,
     body: InviteCreate,
@@ -408,29 +335,29 @@ async def create_knowledge_base_invite(
     )
     if existing_member:
         raise HTTPException(status_code=409, detail="That user already has access to this knowledge base")
-    existing_invite = await pool.fetchval(
-        "SELECT 1 FROM knowledge_base_invites "
-        "WHERE knowledge_base_id = $1 AND lower(email) = $2 AND status = 'pending' AND expires_at >= now()",
-        kb_id,
+    existing_user = await pool.fetchrow(
+        "SELECT id, email, display_name FROM users WHERE lower(email) = $1",
         email,
     )
-    if existing_invite:
-        raise HTTPException(status_code=409, detail="A pending invite already exists for that email")
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = _hash_invite_token(raw_token)
-    expires_at = datetime.now(UTC) + timedelta(days=7)
+    if not existing_user:
+        raise HTTPException(
+            status_code=404,
+            detail="That email does not belong to an existing user yet. Ask them to sign up first.",
+        )
     row = await pool.fetchrow(
-        "INSERT INTO knowledge_base_invites (knowledge_base_id, invited_by, email, role, token_hash, expires_at) "
-        "VALUES ($1, $2, lower($3), $4, $5, $6) "
-        "RETURNING id, email, role, status, expires_at, created_at",
+        "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) "
+        "VALUES ($1, $2, $3) "
+        "ON CONFLICT (knowledge_base_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = now() "
+        "RETURNING user_id, role, created_at",
         kb_id,
-        user_id,
-        email,
+        existing_user["id"],
         body.role,
-        token_hash,
-        expires_at,
     )
-    return {**dict(row), "token": raw_token}
+    return {
+        **dict(row),
+        "email": existing_user["email"],
+        "display_name": existing_user["display_name"],
+    }
 
 
 @router.get("/{kb_id}/compile-preview", response_model=CompilePreviewOut)

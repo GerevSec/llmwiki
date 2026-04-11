@@ -60,22 +60,15 @@ async def seed_collaboration_data(pool):
 
 
 @pytest.mark.asyncio
-async def test_owner_can_invite_and_accept_collaborator(client):
-    invite_resp = await client.post(
+async def test_owner_can_add_existing_collaborator_immediately(client):
+    add_resp = await client.post(
         f"/v1/knowledge-bases/{KB_A_ID}/invites",
         headers=auth_headers(USER_A_ID),
         json={"email": USER_B_EMAIL, "role": "editor"},
     )
-    assert invite_resp.status_code == 201
-    token = invite_resp.json()["token"]
-
-    accept_resp = await client.post(
-        "/v1/knowledge-bases/invites/accept",
-        headers=auth_headers(USER_B_ID),
-        json={"token": token},
-    )
-    assert accept_resp.status_code == 200
-    assert accept_resp.json()["slug"] == "alice-kb"
+    assert add_resp.status_code == 201
+    assert add_resp.json()["email"] == USER_B_EMAIL
+    assert add_resp.json()["role"] == "editor"
 
     member_list = await client.get(
         f"/v1/knowledge-bases/{KB_A_ID}/members",
@@ -83,48 +76,6 @@ async def test_owner_can_invite_and_accept_collaborator(client):
     )
     assert member_list.status_code == 200
     assert any(member["user_id"] == USER_B_ID for member in member_list.json())
-
-
-@pytest.mark.asyncio
-async def test_pending_invites_are_visible_to_matching_email_only(client):
-    invite_resp = await client.post(
-        f"/v1/knowledge-bases/{KB_A_ID}/invites",
-        headers=auth_headers(USER_A_ID),
-        json={"email": USER_B_EMAIL, "role": "viewer"},
-    )
-    assert invite_resp.status_code == 201
-
-    pending_for_bob = await client.get(
-        "/v1/knowledge-bases/invites/pending",
-        headers=auth_headers(USER_B_ID),
-    )
-    assert pending_for_bob.status_code == 200
-    assert len(pending_for_bob.json()) == 1
-
-    pending_for_alice = await client.get(
-        "/v1/knowledge-bases/invites/pending",
-        headers=auth_headers(USER_A_ID),
-    )
-    assert pending_for_alice.status_code == 200
-    assert pending_for_alice.json() == []
-
-
-@pytest.mark.asyncio
-async def test_invite_accept_fails_for_wrong_email(client):
-    invite_resp = await client.post(
-        f"/v1/knowledge-bases/{KB_A_ID}/invites",
-        headers=auth_headers(USER_A_ID),
-        json={"email": "charlie@test.com", "role": "viewer"},
-    )
-    assert invite_resp.status_code == 201
-    token = invite_resp.json()["token"]
-
-    accept_resp = await client.post(
-        "/v1/knowledge-bases/invites/accept",
-        headers=auth_headers(USER_B_ID),
-        json={"token": token},
-    )
-    assert accept_resp.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -217,24 +168,5 @@ async def test_unregistered_user_can_accept_after_signing_up(client, pool):
         headers=auth_headers(USER_A_ID),
         json={"email": "charlie@test.com", "role": "viewer"},
     )
-    assert invite_resp.status_code == 201
-
-    await pool.execute(
-        "INSERT INTO users (id, email, display_name) VALUES ($1, 'charlie@test.com', 'Charlie')",
-        "cccccccc-cccc-cccc-cccc-cccccccccccc",
-    )
-
-    pending_resp = await client.get(
-        "/v1/knowledge-bases/invites/pending",
-        headers=auth_headers("cccccccc-cccc-cccc-cccc-cccccccccccc"),
-    )
-    assert pending_resp.status_code == 200
-    assert len(pending_resp.json()) == 1
-
-    accept_resp = await client.post(
-        "/v1/knowledge-bases/invites/accept",
-        headers=auth_headers("cccccccc-cccc-cccc-cccc-cccccccccccc"),
-        json={"invite_id": pending_resp.json()[0]["id"]},
-    )
-    assert accept_resp.status_code == 200
-    assert accept_resp.json()["slug"] == "alice-kb"
+    assert invite_resp.status_code == 404
+    assert invite_resp.json()["detail"] == "That email does not belong to an existing user yet. Ask them to sign up first."

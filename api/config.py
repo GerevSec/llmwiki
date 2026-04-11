@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     CONVERTER_SECRET: str = ""
 
     GLOBAL_OCR_ENABLED: bool = True
+    OCR_PAGE_LIMITS_ENABLED: bool = False
     GLOBAL_MAX_PAGES: int = 50_000
     GLOBAL_MAX_USERS: int = 200
 
