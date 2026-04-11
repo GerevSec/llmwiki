@@ -811,6 +811,7 @@ function SourceTreeNode({
             const isFile = types.includes('Files')
             if (!isDoc && !isFile) return
             e.preventDefault()
+            e.stopPropagation()
             e.dataTransfer.dropEffect = isDoc ? 'move' : 'copy'
             setDragOver(true)
           }}
@@ -821,6 +822,7 @@ function SourceTreeNode({
             const isFile = types.includes('Files')
             if (!isDoc && !isFile) return
             e.preventDefault()
+            e.stopPropagation()
             setDragOver(false)
             if (isDoc) {
               const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
