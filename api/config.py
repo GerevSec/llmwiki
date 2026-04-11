@@ -22,16 +22,20 @@ class Settings(BaseSettings):
     APP_URL: str = "http://localhost:3000"
     API_URL: str = "http://localhost:8000"
     MCP_URL: str = "http://localhost:8080/mcp"
-    ANTHROPIC_API_KEY: str = ""
+    CORS_ALLOWED_ORIGINS: str = ""
+    CORS_ALLOWED_ORIGIN_REGEX: str = r"https://.*"
+    LLMWIKI_AUTOMATION_SECRET: str = ""
+    LLMWIKI_SETTINGS_ENCRYPTION_KEY: str = ""
     ANTHROPIC_MODEL: str = ""
-    ANTHROPIC_MAX_TOKENS: int = 4096
+    ANTHROPIC_MAX_TOKENS: int = 50_000
+    OPENROUTER_MODEL: str = ""
+    OPENROUTER_MAX_TOKENS: int = 50_000
     LLMWIKI_COMPILE_KB: str = ""
-    LLMWIKI_COMPILE_MCP_TOKEN: str = ""
-    LLMWIKI_COMPILE_PROMPT: str = ""
-    LLMWIKI_COMPILE_MAX_SOURCES: int = 10
-    LLMWIKI_COMPILE_TARGETS_JSON: str = ""
+    LLMWIKI_COMPILE_MAX_SOURCES: int = 20
     LLMWIKI_COMPILE_TIMEOUT_SECONDS: int = 300
     LLMWIKI_COMPILE_MAX_CONTINUATIONS: int = 2
+    LLMWIKI_COMPILE_MAX_TOOL_ROUNDS: int = 50
+    LLMWIKI_COMPILE_DEFAULT_MAX_TOKENS: int = 50_000
     LLMWIKI_COMPILE_DRY_RUN: bool = False
 
     QUOTA_MAX_PAGES: int = 500  # per-user page limit (free tier)

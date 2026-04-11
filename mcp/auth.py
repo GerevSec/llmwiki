@@ -7,6 +7,7 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 
 from api_key_auth import verify_api_key_token
 from config import settings
+from internal_automation_auth import verify_internal_mcp_token
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,17 @@ def _get_jwks_client() -> PyJWKClient:
 class SupabaseTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        if settings.LLMWIKI_AUTOMATION_SECRET:
+            internal_user_id = verify_internal_mcp_token(token, settings.LLMWIKI_AUTOMATION_SECRET)
+            if internal_user_id:
+                logger.info("MCP auth via internal automation token: %s", internal_user_id)
+                return AccessToken(
+                    token=token,
+                    client_id=internal_user_id,
+                    scopes=[],
+                    extra={"claims": {"sub": internal_user_id, "aud": "authenticated", "role": "authenticated"}},
+                )
+
         api_key_user_id = await verify_api_key_token(token)
         if api_key_user_id:
             logger.info("MCP auth via API key: %s", api_key_user_id)

@@ -21,6 +21,9 @@ async def seed_two_tenants(pool):
     await pool.execute("DELETE FROM document_chunks")
     await pool.execute("DELETE FROM document_pages")
     await pool.execute("DELETE FROM documents")
+    await pool.execute("DELETE FROM knowledge_base_invites")
+    await pool.execute("DELETE FROM knowledge_base_memberships")
+    await pool.execute("DELETE FROM knowledge_base_settings")
     await pool.execute("DELETE FROM api_keys")
     await pool.execute("DELETE FROM knowledge_bases")
     await pool.execute("DELETE FROM users")
@@ -40,6 +43,22 @@ async def seed_two_tenants(pool):
     )
     await pool.execute(
         "INSERT INTO knowledge_bases (id, user_id, name, slug) VALUES ($1, $2, 'Bob KB', 'bob-kb')",
+        KB_B_ID, USER_B_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) VALUES ($1, $2, 'owner')",
+        KB_A_ID, USER_A_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) VALUES ($1, $2, 'owner')",
+        KB_B_ID, USER_B_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_settings (knowledge_base_id, updated_by) VALUES ($1, $2)",
+        KB_A_ID, USER_A_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_settings (knowledge_base_id, updated_by) VALUES ($1, $2)",
         KB_B_ID, USER_B_ID,
     )
 

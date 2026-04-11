@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request, HTTPException, Response
 
 from auth import get_current_user
 from config import settings
+from services.kb_access import require_kb_role
 
 logger = logging.getLogger(__name__)
 
@@ -212,11 +213,9 @@ async def tus_create(request: Request):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid knowledge_base_id format")
 
-    kb_owner = await pool.fetchval(
-        "SELECT user_id::text FROM knowledge_bases WHERE id = $1::uuid",
-        kb_id,
-    )
-    if kb_owner != user_id:
+    try:
+        await require_kb_role(pool, kb_id, user_id, "owner", "admin", "editor")
+    except PermissionError:
         raise HTTPException(status_code=403, detail="Knowledge base not found or not owned by you")
     user_limits = await pool.fetchrow(
         "SELECT storage_limit_bytes FROM users WHERE id = $1",

@@ -7,7 +7,7 @@ from mcp.server.fastmcp import Context
 from mcp.server.auth.middleware.auth_context import get_access_token
 
 from config import settings
-from db import scoped_queryrow
+from db import scoped_queryrow, service_queryrow
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,24 @@ async def resolve_kb(user_id: str, slug: str) -> dict | None:
         "SELECT id, name, slug FROM knowledge_bases WHERE slug = $1",
         slug,
     )
+
+
+async def resolve_kb_with_role(user_id: str, slug: str) -> dict | None:
+    return await service_queryrow(
+        "SELECT kb.id, kb.name, kb.slug, m.role "
+        "FROM knowledge_bases kb "
+        "JOIN knowledge_base_memberships m ON m.knowledge_base_id = kb.id "
+        "WHERE kb.slug = $1 AND m.user_id = $2",
+        slug,
+        user_id,
+    )
+
+
+async def require_kb_role(user_id: str, slug: str, *roles: str) -> dict:
+    kb = await resolve_kb_with_role(user_id, slug)
+    if not kb or (roles and kb["role"] not in roles):
+        raise RuntimeError("Knowledge base not found or not permitted")
+    return kb
 
 
 _s3_session = None

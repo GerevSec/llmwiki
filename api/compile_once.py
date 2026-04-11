@@ -5,21 +5,16 @@ import sys
 import asyncpg
 
 from config import settings
-from services.periodic_compile import load_compile_targets, run_target
+from services.periodic_compile import load_target_from_settings, run_target
 
 
 async def main() -> int:
-    if not settings.ANTHROPIC_API_KEY and not settings.LLMWIKI_COMPILE_DRY_RUN:
-        raise RuntimeError("ANTHROPIC_API_KEY is required unless LLMWIKI_COMPILE_DRY_RUN=true")
-    if not settings.ANTHROPIC_MODEL:
-        raise RuntimeError("ANTHROPIC_MODEL is required")
-
-    targets = load_compile_targets()
+    if not settings.LLMWIKI_COMPILE_KB:
+        raise RuntimeError("LLMWIKI_COMPILE_KB is required")
     pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=1, max_size=5)
     try:
-        results = []
-        for target in targets:
-            results.append(await run_target(pool, target))
+        target = await load_target_from_settings(pool, settings.LLMWIKI_COMPILE_KB)
+        results = [await run_target(pool, target)]
     finally:
         await pool.close()
 

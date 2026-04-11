@@ -32,6 +32,26 @@ async def test_moving_document_rewrites_related_markdown_links(client, pool):
         KB_B_ID,
         USER_B_ID,
     )
+    await pool.execute(
+        "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) VALUES ($1, $2, 'owner')",
+        KB_A_ID,
+        USER_A_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) VALUES ($1, $2, 'owner')",
+        KB_B_ID,
+        USER_B_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_settings (knowledge_base_id, updated_by) VALUES ($1, $2)",
+        KB_A_ID,
+        USER_A_ID,
+    )
+    await pool.execute(
+        "INSERT INTO knowledge_base_settings (knowledge_base_id, updated_by) VALUES ($1, $2)",
+        KB_B_ID,
+        USER_B_ID,
+    )
 
     await pool.execute(
         "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "

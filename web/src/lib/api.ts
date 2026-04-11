@@ -9,14 +9,19 @@ export async function apiFetch<T>(
   token: string,
   options?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(`${getApiUrl()}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options?.headers,
-    },
-  })
+  let res: Response
+  try {
+    res = await fetch(`${getApiUrl()}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...options?.headers,
+      },
+    })
+  } catch (error) {
+    throw new Error('Could not reach the API. If you are using a custom app domain, check the API origin/CORS configuration.')
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || `API error: ${res.status}`)

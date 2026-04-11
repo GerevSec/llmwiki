@@ -11,7 +11,7 @@ sys.path.append(str(ROOT / "mcp"))
 from services.periodic_compile import (  # noqa: E402
     CompileTarget,
     PendingSource,
-    _invoke_claude,
+    _invoke_anthropic,
     build_compile_prompt,
     filter_pending_sources,
     run_target,
@@ -122,7 +122,7 @@ class TestPeriodicCompileHelpers:
 
 
 @pytest.mark.asyncio
-async def test_invoke_claude_retries_pause_turn_then_succeeds(monkeypatch):
+async def test_invoke_anthropic_retries_pause_turn_then_succeeds(monkeypatch):
     responses = [
         {
             "stop_reason": "pause_turn",
@@ -162,9 +162,9 @@ async def test_invoke_claude_retries_pause_turn_then_succeeds(monkeypatch):
 
     monkeypatch.setattr("services.periodic_compile.httpx.AsyncClient", FakeClient)
 
-    result = await _invoke_claude(
+    result = await _invoke_anthropic(
         "Compile now",
-        CompileTarget("kb", "sv_token", "https://example.com/mcp", "", 10),
+        CompileTarget("kb", "test-key", "", 10, "anthropic", "claude-test", 4, 1024, "user-1"),
     )
 
     assert result["stop_reason"] == "end_turn"
@@ -172,7 +172,7 @@ async def test_invoke_claude_retries_pause_turn_then_succeeds(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_invoke_claude_rejects_non_terminal_stop_reason(monkeypatch):
+async def test_invoke_anthropic_rejects_non_terminal_stop_reason(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
             return None
@@ -196,9 +196,9 @@ async def test_invoke_claude_rejects_non_terminal_stop_reason(monkeypatch):
     monkeypatch.setattr("services.periodic_compile.httpx.AsyncClient", FakeClient)
 
     with pytest.raises(RuntimeError, match="stop_reason=refusal"):
-        await _invoke_claude(
+        await _invoke_anthropic(
             "Compile now",
-            CompileTarget("kb", "sv_token", "https://example.com/mcp", "", 10),
+            CompileTarget("kb", "test-key", "", 10, "anthropic", "claude-test", 4, 1024, "user-1"),
         )
 
 
@@ -207,6 +207,9 @@ async def test_run_target_rejects_overlapping_compile_lock():
     class FakeConn:
         async def fetchrow(self, sql, *args):
             return {"id": "kb-id", "user_id": "user-id", "slug": "kb", "name": "KB"}
+
+        async def fetch(self, sql, *args):
+            return []
 
         async def fetchval(self, sql, *args):
             return False
@@ -231,5 +234,5 @@ async def test_run_target_rejects_overlapping_compile_lock():
     with pytest.raises(RuntimeError, match="already running"):
         await run_target(
             FakePool(),
-            CompileTarget("kb", "sv_token", "https://example.com/mcp", "", 10),
+            CompileTarget("kb", "test-key", "", 10, "anthropic", "claude-test", 4, 1024, "user-1"),
         )

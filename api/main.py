@@ -31,6 +31,7 @@ from routes.api_keys import router as api_keys_router
 from routes.me import router as me_router
 from routes.usage import router as usage_router
 from routes.admin import router as admin_router
+from routes.internal import router as internal_router
 from infra.tus import router as tus_router, cleanup_stale_uploads
 
 
@@ -74,10 +75,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Supavault API", lifespan=lifespan)
 
+
+def _cors_allowed_origins() -> list[str]:
+    origins = {
+        settings.APP_URL.rstrip("/"),
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    }
+    extra = [origin.strip().rstrip("/") for origin in settings.CORS_ALLOWED_ORIGINS.split(",") if origin.strip()]
+    origins.update(extra)
+    return sorted(origin for origin in origins if origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.APP_URL],
-    allow_credentials=True,
+    allow_origins=_cors_allowed_origins(),
+    allow_origin_regex=settings.CORS_ALLOWED_ORIGIN_REGEX or None,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=[
@@ -97,4 +112,5 @@ app.include_router(api_keys_router)
 app.include_router(me_router)
 app.include_router(usage_router)
 app.include_router(admin_router)
+app.include_router(internal_router)
 app.include_router(tus_router)

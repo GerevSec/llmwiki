@@ -135,48 +135,59 @@ npm run dev
 
 You can automate the same Claude-driven compile workflow with a Railway cron job.
 
-This repo now includes an unattended compiler command in `api/compile_once.py` that:
+This repo now supports:
+
+- **per-KB compile settings** stored in Supabase
+- **per-KB provider secrets** stored encrypted in Supabase
+- **manual compile now** from the app
+- **scheduled compilation** through a cron-triggered internal endpoint
+
+The automation:
 
 1. finds sources that are new or changed since the last successful compile
-2. calls Claude through the Anthropic Messages API
-3. connects Claude to the existing LLM Wiki MCP server
+2. calls Claude via Anthropic or OpenRouter using the KB's stored provider secret
+3. uses the same effective guide/search/read/write/delete tool surface internally
 4. records compile runs plus per-source checkpoints so unchanged files are skipped on later runs
 
 #### Required environment
 
-Set these on the service or cron job that will run the compiler:
+Set these on the API service:
 
 ```bash
 DATABASE_URL=postgresql://...
 MCP_URL=https://your-mcp-service.up.railway.app/mcp
-ANTHROPIC_API_KEY=...
-ANTHROPIC_MODEL=...
-LLMWIKI_COMPILE_KB=your-kb-slug
-LLMWIKI_COMPILE_MCP_TOKEN=sv_your_llmwiki_api_key
-LLMWIKI_COMPILE_MAX_SOURCES=10
+LLMWIKI_SETTINGS_ENCRYPTION_KEY=...
+LLMWIKI_AUTOMATION_SECRET=...
 ```
 
-Optional:
+Optional provider model defaults:
 
 ```bash
-LLMWIKI_COMPILE_PROMPT=Prefer compact updates and refresh overview/log every run.
-LLMWIKI_COMPILE_TARGETS_JSON=[{"knowledge_base":"kb-a","mcp_auth_token":"sv_...","mcp_url":"https://.../mcp"}]
-LLMWIKI_COMPILE_DRY_RUN=true
+ANTHROPIC_MODEL=...
+OPENROUTER_MODEL=anthropic/claude-sonnet-4
 ```
-
-#### Authentication
-
-The MCP server now accepts LLM Wiki API keys (`sv_...`) as bearer tokens for unattended jobs. Create one through the existing API key endpoint and pass it as `LLMWIKI_COMPILE_MCP_TOKEN`.
 
 #### Railway setup
 
-Railway supports cron jobs as a compute type in its current docs. Point the cron job at the API image/repo and use this command:
+1. Deploy the `api`, `web`, and `mcp` services normally.
+2. Deploy the `cron/` directory as a dedicated Railway cron/service.
+3. Configure the cron service with:
 
 ```bash
-python compile_once.py
+API_URL=https://your-api-service.up.railway.app
+LLMWIKI_AUTOMATION_SECRET=...
 ```
 
-Use a schedule like every 30 or 60 minutes depending on how often you expect new sources.
+4. Schedule the cron runtime to run every 5 minutes.
+5. In the app, open KB settings and configure:
+   - provider (`anthropic` or `openrouter`)
+   - model
+   - provider secret/API key
+   - interval
+   - max sources
+   - prompt
+
+The cron service just calls the API's internal `/internal/compile-due` endpoint. The API iterates due KBs itself.
 
 #### Tracking behavior
 
@@ -184,6 +195,8 @@ Use a schedule like every 30 or 60 minutes depending on how often you expect new
 - Per-source checkpoints are stored in `compiled_source_checkpoints`
 - A source is recompiled only when its `documents.version` changes
 - Only ready, non-archived, non-`/wiki/` documents are eligible
+- Per-KB schedule settings are stored in `knowledge_base_settings`
+- KB collaboration lives in `knowledge_base_memberships` and `knowledge_base_invites`
 
 #### Environment Variables
 

@@ -4,10 +4,10 @@ import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import { useKBStore, useUserStore } from '@/stores'
 import {
-  Plus, Loader2, Upload, LogOut, Moon, Sun, BookOpen,
+  Plus, Loader2, Upload, LogOut, Moon, Sun, BookOpen, Trash2,
 } from 'lucide-react'
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from '@/components/ui/dialog'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useTheme } from 'next-themes'
 import { createClient } from '@/lib/supabase/client'
+import { toast } from 'sonner'
 
 function relativeTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime()
@@ -30,15 +31,73 @@ function relativeTime(dateStr: string): string {
   return `${Math.floor(months / 12)}y ago`
 }
 
+function DeleteWikiDialog({
+  open,
+  name,
+  value,
+  deleting,
+  onValueChange,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean
+  name: string
+  value: string
+  deleting: boolean
+  onValueChange: (value: string) => void
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete wiki</DialogTitle>
+          <DialogDescription>
+            This permanently deletes <strong>{name}</strong>. Type the wiki name exactly to confirm.
+          </DialogDescription>
+        </DialogHeader>
+        <input
+          autoFocus
+          value={value}
+          onChange={(e) => onValueChange(e.target.value)}
+          placeholder={name}
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+        />
+        <DialogFooter>
+          <button
+            onClick={() => onOpenChange(false)}
+            className="rounded-md border border-border px-3 py-2 text-sm hover:bg-accent cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={deleting || value !== name}
+            className="inline-flex items-center gap-2 rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90 disabled:opacity-50 cursor-pointer"
+          >
+            {deleting ? <Loader2 className="size-4 animate-spin" /> : null}
+            Delete wiki
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export default function WikisPage() {
   const router = useRouter()
   const knowledgeBases = useKBStore((s) => s.knowledgeBases)
   const loading = useKBStore((s) => s.loading)
   const createKB = useKBStore((s) => s.createKB)
+  const deleteKB = useKBStore((s) => s.deleteKB)
   const user = useUserStore((s) => s.user)
   const [creating, setCreating] = React.useState(false)
   const [dialogOpen, setDialogOpen] = React.useState(false)
   const [name, setName] = React.useState('')
+  const [deleteDialog, setDeleteDialog] = React.useState<{ kbId: string; kbName: string } | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = React.useState('')
+  const [deletingKbId, setDeletingKbId] = React.useState<string | null>(null)
 
   const handleQuickCreate = async () => {
     setCreating(true)
@@ -66,6 +125,22 @@ export default function WikisPage() {
       console.error('Failed to create KB:', err)
     } finally {
       setCreating(false)
+    }
+  }
+
+  const handleDeleteWiki = async () => {
+    if (!deleteDialog) return
+    setDeletingKbId(deleteDialog.kbId)
+    try {
+      await deleteKB(deleteDialog.kbId)
+      setDeleteDialog(null)
+      setDeleteConfirmation('')
+      toast.success(`Deleted ${deleteDialog.kbName}`)
+    } catch (err) {
+      console.error('Failed to delete KB:', err)
+      toast.error((err as Error).message || 'Failed to delete wiki')
+    } finally {
+      setDeletingKbId(null)
     }
   }
 
@@ -184,7 +259,22 @@ export default function WikisPage() {
                       {kb.description && (
                         <p className="text-xs text-muted-foreground mt-0.5 truncate">{kb.description}</p>
                       )}
+                      <div className="mt-1 text-[11px] text-muted-foreground">{kb.role}</div>
                     </div>
+                    {kb.role === 'owner' && (
+                      <button
+                        onClick={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setDeleteDialog({ kbId: kb.id, kbName: kb.name })
+                          setDeleteConfirmation('')
+                        }}
+                        className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors cursor-pointer"
+                        aria-label={`Delete ${kb.name}`}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 text-[11px] text-muted-foreground/50 w-full">
                     {stats.length > 0 ? (
@@ -218,6 +308,20 @@ export default function WikisPage() {
         onNameChange={setName}
         creating={creating}
         onCreate={handleCreate}
+      />
+      <DeleteWikiDialog
+        open={deleteDialog !== null}
+        name={deleteDialog?.kbName ?? ''}
+        value={deleteConfirmation}
+        deleting={deleteDialog !== null && deletingKbId === deleteDialog.kbId}
+        onValueChange={setDeleteConfirmation}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteDialog(null)
+            setDeleteConfirmation('')
+          }
+        }}
+        onConfirm={handleDeleteWiki}
       />
     </div>
   )

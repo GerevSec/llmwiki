@@ -17,6 +17,7 @@ from services.document_links import (
     rebase_relative_markdown_links,
     rewrite_markdown_links_to_target,
 )
+from services.kb_access import require_kb_role
 
 router = APIRouter(tags=["documents"])
 
@@ -196,11 +197,9 @@ async def create_note(
 ):
     pool = request.app.state.pool
 
-    kb = await pool.fetchval(
-        "SELECT id FROM knowledge_bases WHERE id = $1 AND user_id = $2",
-        kb_id, user_id,
-    )
-    if not kb:
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, "owner", "admin", "editor")
+    except PermissionError:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
 
     meta, _ = parse_frontmatter(body.content)
@@ -244,18 +243,25 @@ async def update_document_content(
 ):
     pool = request.app.state.pool
 
-    row = await pool.fetchrow(
-        "UPDATE documents SET content = $1, version = version + 1, updated_at = now() "
-        "WHERE id = $2 AND user_id = $3 "
-        "RETURNING id, content, version",
-        body.content, doc_id, user_id,
+    current = await pool.fetchrow(
+        "SELECT knowledge_base_id::text AS knowledge_base_id FROM documents WHERE id = $1 AND archived = false",
+        doc_id,
     )
-    if not row:
+    if not current:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        await require_kb_role(pool, current["knowledge_base_id"], user_id, "owner", "admin", "editor")
+    except PermissionError:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    kb_id = await pool.fetchval(
-        "SELECT knowledge_base_id::text FROM documents WHERE id = $1", doc_id,
+    row = await pool.fetchrow(
+        "UPDATE documents SET content = $1, version = version + 1, updated_at = now() "
+        "WHERE id = $2 "
+        "RETURNING id, content, version",
+        body.content, doc_id,
     )
+
+    kb_id = current["knowledge_base_id"]
     if kb_id:
         chunks = chunk_text(body.content) if body.content else []
         await store_chunks(pool, str(doc_id), user_id, kb_id, chunks)
@@ -274,16 +280,21 @@ async def update_document_metadata(
 
     current = await pool.fetchrow(
         "SELECT id, knowledge_base_id, user_id, filename, path, file_type, content "
-        "FROM documents WHERE id = $1 AND user_id = $2 AND archived = false",
-        doc_id, user_id,
+        "FROM documents WHERE id = $1 AND archived = false",
+        doc_id,
     )
     if not current:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        await require_kb_role(pool, str(current["knowledge_base_id"]), user_id, "owner", "admin", "editor")
+    except PermissionError:
         raise HTTPException(status_code=404, detail="Document not found")
 
     next_filename = body.filename if body.filename is not None else current["filename"]
     next_path = _normalize_path(body.path) if body.path is not None else current["path"]
     current_path = _normalize_path(current["path"])
     location_changed = next_filename != current["filename"] or next_path != current_path
+    current_doc_rewritten = False
 
     rewrites: list[tuple[str, str, str, str]] = []
     if location_changed:
@@ -316,6 +327,8 @@ async def update_document_metadata(
                 )
 
             if rewritten != doc["content"]:
+                if doc["id"] == current["id"]:
+                    current_doc_rewritten = True
                 rewrites.append((
                     str(doc["id"]),
                     rewritten,
@@ -355,15 +368,14 @@ async def update_document_metadata(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    if location_changed:
+    if location_changed and not current_doc_rewritten:
         updates.append("version = version + 1")
     updates.append("updated_at = now()")
     params.append(doc_id)
-    params.append(user_id)
 
     sql = (
         f"UPDATE documents SET {', '.join(updates)} "
-        f"WHERE id = ${idx} AND user_id = ${idx + 1} "
+        f"WHERE id = ${idx} "
         f"RETURNING {_DOC_COLUMNS}"
     )
     conn = await pool.acquire()
@@ -406,10 +418,24 @@ async def bulk_delete_documents(
     if not body.ids:
         return
     pool = request.app.state.pool
+    rows = await pool.fetch(
+        "SELECT id::text AS id, knowledge_base_id::text AS knowledge_base_id FROM documents "
+        "WHERE id = ANY($1::uuid[]) AND archived = false",
+        [str(i) for i in body.ids],
+    )
+    allowed_ids: list[str] = []
+    for row in rows:
+        try:
+            await require_kb_role(pool, row["knowledge_base_id"], user_id, "owner", "admin", "editor")
+            allowed_ids.append(row["id"])
+        except PermissionError:
+            continue
+    if not allowed_ids:
+        return
     await pool.execute(
         "UPDATE documents SET archived = true, updated_at = now() "
-        "WHERE id = ANY($1::uuid[]) AND user_id = $2",
-        [str(i) for i in body.ids], user_id,
+        "WHERE id = ANY($1::uuid[])",
+        allowed_ids,
     )
 
 
@@ -420,10 +446,21 @@ async def delete_document(
     request: Request,
 ):
     pool = request.app.state.pool
+    current = await pool.fetchrow(
+        "SELECT knowledge_base_id::text AS knowledge_base_id FROM documents WHERE id = $1 AND archived = false",
+        doc_id,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        await require_kb_role(pool, current["knowledge_base_id"], user_id, "owner", "admin", "editor")
+    except PermissionError:
+        raise HTTPException(status_code=404, detail="Document not found")
+
     result = await pool.execute(
         "UPDATE documents SET archived = true, updated_at = now() "
-        "WHERE id = $1 AND user_id = $2",
-        doc_id, user_id,
+        "WHERE id = $1",
+        doc_id,
     )
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Document not found")

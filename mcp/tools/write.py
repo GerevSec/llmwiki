@@ -5,7 +5,7 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP, Context
 
 from db import scoped_queryrow, service_queryrow, service_execute
-from .helpers import get_user_id, resolve_kb, deep_link, resolve_path
+from .helpers import get_user_id, require_kb_role, deep_link, resolve_path
 
 _ASSET_EXTENSIONS = {".svg", ".csv", ".json", ".xml", ".html"}
 
@@ -102,8 +102,8 @@ async def _edit_note(user_id: str, kb: dict, path: str, old_text: str, new_text:
     new_content = content.replace(old_text, new_text, 1)
     await service_execute(
         "UPDATE documents SET content = $1, version = version + 1 "
-        "WHERE id = $2 AND user_id = $3",
-        new_content, doc["id"], user_id,
+        "WHERE id = $2",
+        new_content, doc["id"],
     )
 
     link = deep_link(kb["slug"], dir_path, filename)
@@ -125,8 +125,8 @@ async def _append_note(user_id: str, kb: dict, path: str, content: str) -> str:
     new_content = (doc["content"] or "") + "\n\n" + content
     await service_execute(
         "UPDATE documents SET content = $1, version = version + 1 "
-        "WHERE id = $2 AND user_id = $3",
-        new_content, doc["id"], user_id,
+        "WHERE id = $2",
+        new_content, doc["id"],
     )
 
     link = deep_link(kb["slug"], dir_path, filename)
@@ -165,8 +165,9 @@ def register(mcp: FastMCP) -> None:
     ) -> str:
         user_id = get_user_id(ctx)
 
-        kb = await resolve_kb(user_id, knowledge_base)
-        if not kb:
+        try:
+            kb = await require_kb_role(user_id, knowledge_base, "owner", "admin", "editor")
+        except RuntimeError:
             return f"Knowledge base '{knowledge_base}' not found."
 
         if command == "create":

@@ -3,6 +3,7 @@ export interface KnowledgeBase {
   user_id: string
   name: string
   slug: string
+  role: string
   description: string | null
   source_count: number
   wiki_page_count: number

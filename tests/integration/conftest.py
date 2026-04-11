@@ -19,6 +19,13 @@ async def pool():
 
     schema_sql = (Path(__file__).parent.parent / "helpers" / "schema.sql").read_text()
     await pool.execute(schema_sql)
+    for migration in [
+        Path(__file__).parent.parent.parent / "supabase" / "migrations" / "002_periodic_compile.sql",
+        Path(__file__).parent.parent.parent / "supabase" / "migrations" / "003_compile_schedules_and_providers.sql",
+        Path(__file__).parent.parent.parent / "supabase" / "migrations" / "004_collaboration_and_kb_settings.sql",
+        Path(__file__).parent.parent.parent / "supabase" / "migrations" / "005_compile_defaults_and_limits.sql",
+    ]:
+        await pool.execute(migration.read_text())
 
     yield pool
     pool.terminate()

@@ -1,0 +1,9 @@
+{
+  "name": "llmwiki-cron",
+  "private": true,
+  "packageManager": "bun@1.3.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun index.mjs"
+  }
+}

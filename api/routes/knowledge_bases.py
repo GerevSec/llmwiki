@@ -1,6 +1,7 @@
+import hashlib
 import re
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -10,19 +11,32 @@ from pydantic import BaseModel
 from config import settings
 from deps import get_scoped_db, get_user_id
 from scoped_db import ScopedDB
-from services.periodic_compile import CompileTarget, filter_pending_sources, run_target
+from services.encryption import decrypt_secret, encrypt_secret
+from services.kb_access import ADMIN_ROLES, get_kb_for_member, get_user_email, require_kb_role
+from services.periodic_compile import (
+    CompileTarget,
+    default_compile_provider,
+    default_max_sources,
+    default_max_tokens,
+    default_max_tool_rounds,
+    default_model_for_provider,
+    get_compile_context,
+    next_run_at,
+    run_target,
+)
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 
 _KB_COLUMNS = "id, user_id, name, slug, description, created_at, updated_at"
 _KB_WITH_COUNTS = (
-    "SELECT kb.id, kb.user_id, kb.name, kb.slug, kb.description, "
+    "SELECT kb.id, kb.user_id, kb.name, kb.slug, kb.description, m.role, "
     "  kb.created_at, kb.updated_at, "
     "  (SELECT COUNT(*) FROM documents d "
     "   WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%%' AND NOT d.archived) AS source_count, "
     "  (SELECT COUNT(*) FROM documents d "
     "   WHERE d.knowledge_base_id = kb.id AND d.path LIKE '/wiki/%%' AND NOT d.archived) AS wiki_page_count "
-    "FROM knowledge_bases kb"
+    "FROM knowledge_bases kb "
+    "JOIN knowledge_base_memberships m ON m.knowledge_base_id = kb.id"
 )
 
 
@@ -36,16 +50,61 @@ class UpdateKnowledgeBase(BaseModel):
     description: str | None = None
 
 
+class InviteCreate(BaseModel):
+    email: str
+    role: str
+
+
+class InviteAccept(BaseModel):
+    token: str | None = None
+    invite_id: str | None = None
+
+
+class MembershipUpdate(BaseModel):
+    role: str
+
+
+class UpdateCompileSchedule(BaseModel):
+    enabled: bool
+    provider: str
+    model: str | None = None
+    interval_minutes: int
+    max_sources: int
+    prompt: str | None = None
+    provider_secret: str | None = None
+    max_tool_rounds: int | None = None
+    max_tokens: int | None = None
+
+
 class KnowledgeBaseOut(BaseModel):
     id: UUID
     user_id: UUID
     name: str
     slug: str
+    role: str
     description: str | None = None
     source_count: int = 0
     wiki_page_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class MembershipOut(BaseModel):
+    user_id: UUID
+    email: str | None = None
+    display_name: str | None = None
+    role: str
+    created_at: datetime
+
+
+class InviteOut(BaseModel):
+    id: UUID
+    email: str
+    role: str
+    status: str
+    expires_at: datetime
+    created_at: datetime
+    token: str | None = None
 
 
 class CompileNowOut(BaseModel):
@@ -65,11 +124,33 @@ class CompileRunOut(BaseModel):
     id: UUID
     status: str
     model: str
+    provider: str
     source_count: int
     response_excerpt: str | None = None
     error_message: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
+
+
+class KnowledgeBaseSettingsOut(BaseModel):
+    knowledge_base: str
+    enabled: bool
+    provider: str
+    model: str | None = None
+    interval_minutes: int
+    max_sources: int
+    prompt: str = ""
+    max_tool_rounds: int
+    max_tokens: int
+    has_provider_secret: bool
+    last_run_at: datetime | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    next_run_at: datetime | None = None
+
+
+def _hash_invite_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _slugify(name: str) -> str:
@@ -79,15 +160,28 @@ def _slugify(name: str) -> str:
     return slug or "kb"
 
 
-async def _unique_slug(pool, user_id: str, name: str) -> str:
+async def _unique_slug(pool, name: str) -> str:
     slug = _slugify(name)
-    exists = await pool.fetchval(
-        "SELECT 1 FROM knowledge_bases WHERE slug = $1 AND user_id = $2",
-        slug, user_id,
-    )
+    exists = await pool.fetchval("SELECT 1 FROM knowledge_bases WHERE slug = $1", slug)
     if exists:
         slug = f"{slug}-{secrets.token_hex(3)}"
     return slug
+
+
+def _normalize_invite_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _resolved_max_sources(value: int | None) -> int:
+    return value or default_max_sources()
+
+
+def _resolved_max_tool_rounds(value: int | None) -> int:
+    return value or default_max_tool_rounds()
+
+
+def _resolved_max_tokens(value: int | None) -> int:
+    return value or default_max_tokens()
 
 
 _OVERVIEW_TEMPLATE = """\
@@ -110,11 +204,9 @@ Chronological record of ingests, queries, and maintenance passes.
 """
 
 
-# ── Read routes (RLS-enforced via ScopedDB) ──
-
 @router.get("", response_model=list[KnowledgeBaseOut])
 async def list_knowledge_bases(db: Annotated[ScopedDB, Depends(get_scoped_db)]):
-    rows = await db.fetch(f"{_KB_WITH_COUNTS} ORDER BY kb.updated_at DESC")
+    rows = await db.fetch(f"{_KB_WITH_COUNTS} WHERE m.user_id = $1 ORDER BY kb.updated_at DESC", db.user_id)
     return rows
 
 
@@ -123,10 +215,222 @@ async def get_knowledge_base(
     kb_id: UUID,
     db: Annotated[ScopedDB, Depends(get_scoped_db)],
 ):
-    row = await db.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1", kb_id)
+    row = await db.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", kb_id, db.user_id)
     if not row:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     return row
+
+
+@router.get("/invites/pending", response_model=list[InviteOut])
+async def list_pending_knowledge_base_invites(
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    email = await get_user_email(pool, user_id)
+    if not email:
+        return []
+    rows = await pool.fetch(
+        "SELECT id, email, role, status, expires_at, created_at "
+        "FROM knowledge_base_invites "
+        "WHERE lower(email) = lower($1) AND status = 'pending' "
+        "ORDER BY created_at DESC",
+        email,
+    )
+    return [dict(row) for row in rows]
+
+
+@router.post("/invites/accept", response_model=KnowledgeBaseOut)
+async def accept_knowledge_base_invite(
+    body: InviteAccept,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    conn = await pool.acquire()
+    try:
+        async with conn.transaction():
+            if body.invite_id:
+                invite = await conn.fetchrow(
+                    "SELECT id, knowledge_base_id, email, role, status, expires_at "
+                    "FROM knowledge_base_invites WHERE id = $1::uuid",
+                    body.invite_id,
+                )
+            elif body.token:
+                invite = await conn.fetchrow(
+                    "SELECT id, knowledge_base_id, email, role, status, expires_at "
+                    "FROM knowledge_base_invites WHERE token_hash = $1",
+                    _hash_invite_token(body.token),
+                )
+            else:
+                raise HTTPException(status_code=400, detail="invite_id or token is required")
+            if not invite or invite["status"] != "pending" or invite["expires_at"] < datetime.now(UTC):
+                raise HTTPException(status_code=404, detail="Invite not found or expired")
+
+            user_email = await conn.fetchval("SELECT email FROM users WHERE id = $1", user_id)
+            if (user_email or "").lower() != invite["email"]:
+                raise HTTPException(status_code=403, detail="Invite email does not match current user")
+
+            await conn.execute(
+                "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) "
+                "VALUES ($1, $2, $3) "
+                "ON CONFLICT (knowledge_base_id, user_id) DO UPDATE SET role = EXCLUDED.role, updated_at = now()",
+                invite["knowledge_base_id"],
+                user_id,
+                invite["role"],
+            )
+            await conn.execute(
+                "UPDATE knowledge_base_invites SET status = 'accepted', accepted_at = now(), updated_at = now() WHERE id = $1",
+                invite["id"],
+            )
+            row = await conn.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", invite["knowledge_base_id"], user_id)
+    finally:
+        await pool.release(conn)
+    return dict(row)
+
+
+@router.get("/{kb_id}/members", response_model=list[MembershipOut])
+async def list_knowledge_base_members(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    kb = await get_kb_for_member(pool, str(kb_id), user_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    rows = await pool.fetch(
+        "SELECT m.user_id, u.email, u.display_name, m.role, m.created_at "
+        "FROM knowledge_base_memberships m "
+        "JOIN users u ON u.id = m.user_id "
+        "WHERE m.knowledge_base_id = $1 ORDER BY m.created_at",
+        kb_id,
+    )
+    return [dict(row) for row in rows]
+
+
+@router.patch("/{kb_id}/members/{member_id}", response_model=MembershipOut)
+async def update_knowledge_base_member(
+    kb_id: UUID,
+    member_id: UUID,
+    body: MembershipUpdate,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    if body.role not in {"viewer", "editor", "admin"}:
+        raise HTTPException(status_code=400, detail="Invalid member role")
+    pool = request.app.state.pool
+    try:
+        access = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    if str(member_id) == access["owner_user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot change the owner role")
+    row = await pool.fetchrow(
+        "UPDATE knowledge_base_memberships m "
+        "SET role = $1, updated_at = now() "
+        "FROM users u "
+        "WHERE m.knowledge_base_id = $2 AND m.user_id = $3 AND u.id = m.user_id "
+        "RETURNING m.user_id, u.email, u.display_name, m.role, m.created_at",
+        body.role,
+        kb_id,
+        member_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Member not found")
+    return dict(row)
+
+
+@router.delete("/{kb_id}/members/{member_id}", status_code=204)
+async def remove_knowledge_base_member(
+    kb_id: UUID,
+    member_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        access = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    if str(member_id) == access["owner_user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot remove the owner from the knowledge base")
+    result = await pool.execute(
+        "DELETE FROM knowledge_base_memberships WHERE knowledge_base_id = $1 AND user_id = $2",
+        kb_id,
+        member_id,
+    )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Member not found")
+
+
+@router.get("/{kb_id}/invites", response_model=list[InviteOut])
+async def list_knowledge_base_invites(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    rows = await pool.fetch(
+        "SELECT id, email, role, status, expires_at, created_at "
+        "FROM knowledge_base_invites WHERE knowledge_base_id = $1 ORDER BY created_at DESC",
+        kb_id,
+    )
+    return [dict(row) for row in rows]
+
+
+@router.post("/{kb_id}/invites", response_model=InviteOut, status_code=201)
+async def create_knowledge_base_invite(
+    kb_id: UUID,
+    body: InviteCreate,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    if body.role not in {"viewer", "editor", "admin"}:
+        raise HTTPException(status_code=400, detail="Invalid invite role")
+    pool = request.app.state.pool
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    email = _normalize_invite_email(body.email)
+    existing_member = await pool.fetchval(
+        "SELECT 1 "
+        "FROM knowledge_base_memberships m "
+        "JOIN users u ON u.id = m.user_id "
+        "WHERE m.knowledge_base_id = $1 AND lower(u.email) = $2",
+        kb_id,
+        email,
+    )
+    if existing_member:
+        raise HTTPException(status_code=409, detail="That user already has access to this knowledge base")
+    existing_invite = await pool.fetchval(
+        "SELECT 1 FROM knowledge_base_invites "
+        "WHERE knowledge_base_id = $1 AND lower(email) = $2 AND status = 'pending' AND expires_at >= now()",
+        kb_id,
+        email,
+    )
+    if existing_invite:
+        raise HTTPException(status_code=409, detail="A pending invite already exists for that email")
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = _hash_invite_token(raw_token)
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    row = await pool.fetchrow(
+        "INSERT INTO knowledge_base_invites (knowledge_base_id, invited_by, email, role, token_hash, expires_at) "
+        "VALUES ($1, $2, lower($3), $4, $5, $6) "
+        "RETURNING id, email, role, status, expires_at, created_at",
+        kb_id,
+        user_id,
+        email,
+        body.role,
+        token_hash,
+        expires_at,
+    )
+    return {**dict(row), "token": raw_token}
 
 
 @router.get("/{kb_id}/compile-preview", response_model=CompilePreviewOut)
@@ -136,39 +440,20 @@ async def get_compile_preview(
     request: Request,
 ):
     pool = request.app.state.pool
-    kb = await pool.fetchrow(
-        "SELECT id::text AS id, slug FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    settings_row = await pool.fetchrow(
+        "SELECT compile_max_sources FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
-        user_id,
     )
-    if not kb:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
-
-    checkpoint_rows = await pool.fetch(
-        "SELECT document_id::text AS document_id, compiled_version "
-        "FROM compiled_source_checkpoints WHERE knowledge_base_id = $1::uuid",
-        kb["id"],
+    _, pending = await get_compile_context(
+        pool,
+        kb["slug"],
+        settings_row["compile_max_sources"] if settings_row else settings.LLMWIKI_COMPILE_MAX_SOURCES,
     )
-    checkpoints = {row["document_id"]: row["compiled_version"] for row in checkpoint_rows}
-
-    document_rows = [
-        dict(row)
-        for row in await pool.fetch(
-            "SELECT id::text AS id, path, filename, COALESCE(title, filename) AS title, "
-            "status, archived, version, updated_at "
-            "FROM documents WHERE knowledge_base_id = $1::uuid",
-            kb["id"],
-        )
-    ]
-    pending = filter_pending_sources(
-        document_rows,
-        checkpoints,
-        settings.LLMWIKI_COMPILE_MAX_SOURCES,
-    )
-    return {
-        "knowledge_base": kb["slug"],
-        "pending_source_count": len(pending),
-    }
+    return {"knowledge_base": kb["slug"], "pending_source_count": len(pending)}
 
 
 @router.get("/{kb_id}/compile-runs", response_model=list[CompileRunOut])
@@ -179,21 +464,124 @@ async def list_compile_runs(
     limit: int = Query(10, ge=1, le=50),
 ):
     pool = request.app.state.pool
-    kb = await pool.fetchrow(
-        "SELECT id FROM knowledge_bases WHERE id = $1 AND user_id = $2",
-        kb_id,
-        user_id,
-    )
-    if not kb:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
-
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
     rows = await pool.fetch(
-        "SELECT id, status, model, source_count, response_excerpt, error_message, started_at, finished_at "
+        "SELECT id, status, model, provider, source_count, response_excerpt, error_message, started_at, finished_at "
         "FROM compile_runs WHERE knowledge_base_id = $1 ORDER BY started_at DESC LIMIT $2",
         kb_id,
         limit,
     )
     return [dict(row) for row in rows]
+
+
+@router.get("/{kb_id}/compile-schedule", response_model=KnowledgeBaseSettingsOut)
+async def get_compile_schedule(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    row = await pool.fetchrow(
+        "SELECT auto_compile_enabled AS enabled, compile_provider AS provider, compile_model AS model, "
+        "compile_interval_minutes AS interval_minutes, compile_max_sources AS max_sources, compile_prompt AS prompt, "
+        "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
+        "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
+        "last_run_at, last_status, last_error, next_run_at "
+        "FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
+    if not row:
+        provider = default_compile_provider()
+        return {
+            "knowledge_base": kb["slug"],
+            "enabled": False,
+            "provider": provider,
+            "model": default_model_for_provider(provider) or None,
+            "interval_minutes": 60,
+            "max_sources": default_max_sources(),
+            "prompt": "",
+            "max_tool_rounds": default_max_tool_rounds(),
+            "max_tokens": default_max_tokens(),
+            "has_provider_secret": False,
+        }
+    return {"knowledge_base": kb["slug"], **dict(row)}
+
+
+@router.put("/{kb_id}/compile-schedule", response_model=KnowledgeBaseSettingsOut)
+async def update_compile_schedule(
+    kb_id: UUID,
+    body: UpdateCompileSchedule,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    provider = body.provider.strip().lower()
+    if provider not in {"anthropic", "openrouter"}:
+        raise HTTPException(status_code=400, detail="Unsupported compile provider")
+    model = (body.model or "").strip() or default_model_for_provider(provider)
+    if not model:
+        raise HTTPException(status_code=400, detail="Model is required")
+    max_sources = _resolved_max_sources(body.max_sources)
+    max_tool_rounds = _resolved_max_tool_rounds(body.max_tool_rounds)
+    max_tokens = _resolved_max_tokens(body.max_tokens)
+    if body.interval_minutes < 5 or body.interval_minutes > 10080:
+        raise HTTPException(status_code=400, detail="Interval must be between 5 minutes and 7 days")
+    if max_sources < 1 or max_sources > 200:
+        raise HTTPException(status_code=400, detail="Max sources must be between 1 and 200")
+    if max_tool_rounds < 1 or max_tool_rounds > 500:
+        raise HTTPException(status_code=400, detail="Max tool rounds must be between 1 and 500")
+    if max_tokens < 256 or max_tokens > 200000:
+        raise HTTPException(status_code=400, detail="Max tokens must be between 256 and 200000")
+    existing_secret = await pool.fetchval(
+        "SELECT provider_secret_encrypted FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
+    provider_secret = (body.provider_secret or "").strip()
+    if body.enabled and not provider_secret and not existing_secret:
+        raise HTTPException(status_code=400, detail="Provider secret is required before enabling periodic compile")
+    encrypted_secret = encrypt_secret(provider_secret) if provider_secret else None
+    next_due = next_run_at(body.interval_minutes) if body.enabled else None
+    row = await pool.fetchrow(
+        "INSERT INTO knowledge_base_settings "
+        "(knowledge_base_id, auto_compile_enabled, compile_provider, compile_model, compile_interval_minutes, compile_max_sources, compile_prompt, compile_max_tool_rounds, compile_max_tokens, provider_secret_encrypted, provider_secret_updated_at, next_run_at, updated_by) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text, CASE WHEN $10::text IS NULL THEN NULL ELSE now() END, $11, $12) "
+        "ON CONFLICT (knowledge_base_id) DO UPDATE SET "
+        "auto_compile_enabled = EXCLUDED.auto_compile_enabled, compile_provider = EXCLUDED.compile_provider, compile_model = EXCLUDED.compile_model, "
+        "compile_interval_minutes = EXCLUDED.compile_interval_minutes, compile_max_sources = EXCLUDED.compile_max_sources, compile_prompt = EXCLUDED.compile_prompt, "
+        "compile_max_tool_rounds = EXCLUDED.compile_max_tool_rounds, compile_max_tokens = EXCLUDED.compile_max_tokens, "
+        "provider_secret_encrypted = COALESCE(EXCLUDED.provider_secret_encrypted, knowledge_base_settings.provider_secret_encrypted), "
+        "provider_secret_updated_at = CASE WHEN EXCLUDED.provider_secret_encrypted IS NULL THEN knowledge_base_settings.provider_secret_updated_at ELSE now() END, "
+        "next_run_at = EXCLUDED.next_run_at, updated_by = EXCLUDED.updated_by "
+        "RETURNING auto_compile_enabled AS enabled, compile_provider AS provider, compile_model AS model, "
+        "compile_interval_minutes AS interval_minutes, compile_max_sources AS max_sources, compile_prompt AS prompt, "
+        "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
+        "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
+        "last_run_at, last_status, last_error, next_run_at",
+        kb_id,
+        body.enabled,
+        provider,
+        model,
+        body.interval_minutes,
+        max_sources,
+        (body.prompt or "").strip(),
+        max_tool_rounds,
+        max_tokens,
+        encrypted_secret,
+        next_due,
+        user_id,
+    )
+    return {"knowledge_base": kb["slug"], **dict(row)}
 
 
 @router.post("/{kb_id}/compile-now", response_model=CompileNowOut)
@@ -202,39 +590,34 @@ async def compile_knowledge_base_now(
     user_id: Annotated[str, Depends(get_user_id)],
     request: Request,
 ):
-    if not settings.ANTHROPIC_API_KEY or not settings.ANTHROPIC_MODEL:
-        raise HTTPException(
-            status_code=503,
-            detail="Periodic compile is not configured on the server.",
-        )
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    access_token = auth_header.removeprefix("Bearer ").strip()
     pool = request.app.state.pool
-    kb = await pool.fetchrow(
-        "SELECT slug FROM knowledge_bases WHERE id = $1 AND user_id = $2",
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    settings_row = await pool.fetchrow(
+        "SELECT compile_provider, compile_model, compile_max_sources, compile_prompt, "
+        "compile_max_tool_rounds, compile_max_tokens, provider_secret_encrypted "
+        "FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
-        user_id,
     )
-    if not kb:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
-
+    if not settings_row or not settings_row["provider_secret_encrypted"]:
+        raise HTTPException(status_code=400, detail="Compile provider secret is not configured")
     target = CompileTarget(
         knowledge_base=kb["slug"],
-        mcp_auth_token=access_token,
-        mcp_url=settings.MCP_URL,
-        prompt=settings.LLMWIKI_COMPILE_PROMPT,
-        max_sources=settings.LLMWIKI_COMPILE_MAX_SOURCES,
+        provider_api_key=decrypt_secret(settings_row["provider_secret_encrypted"]) or "",
+        prompt=settings_row["compile_prompt"] or "",
+        max_sources=settings_row["compile_max_sources"] or default_max_sources(),
+        provider=settings_row["compile_provider"],
+        model=settings_row["compile_model"] or default_model_for_provider(settings_row["compile_provider"]),
+        max_tool_rounds=settings_row["compile_max_tool_rounds"] or default_max_tool_rounds(),
+        max_tokens=settings_row["compile_max_tokens"] or default_max_tokens(),
+        actor_user_id=kb["owner_user_id"],
     )
-
     try:
         result = await run_target(pool, target)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
     return result
 
 
@@ -255,39 +638,58 @@ async def create_knowledge_base(
             detail="We've reached our user capacity for now. Please try again later.",
         )
 
-    slug = await _unique_slug(pool, user_id, body.name)
+    existing = await pool.fetchval(
+        "SELECT 1 FROM knowledge_bases WHERE user_id = $1 AND name = $2",
+        user_id,
+        body.name,
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="You already have a knowledge base with that name.")
+
+    slug = await _unique_slug(pool, body.name)
 
     conn = await pool.acquire()
     try:
         async with conn.transaction():
             row = await conn.fetchrow(
-                f"INSERT INTO knowledge_bases (user_id, name, slug, description) "
-                f"VALUES ($1, $2, $3, $4) RETURNING {_KB_COLUMNS}",
-                user_id, body.name, slug, body.description,
+                f"INSERT INTO knowledge_bases (user_id, name, slug, description) VALUES ($1, $2, $3, $4) RETURNING {_KB_COLUMNS}",
+                user_id,
+                body.name,
+                slug,
+                body.description,
             )
-
             kb_id = row["id"]
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
 
             await conn.execute(
-                "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, "
-                "file_type, status, content, tags, version, sort_order) "
-                "VALUES ($1, $2, 'overview.md', 'Overview', '/wiki/', "
-                "'md', 'ready', $3, $4, 0, -100)",
-                kb_id, user_id,
+                "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, file_type, status, content, tags, version, sort_order) "
+                "VALUES ($1, $2, 'overview.md', 'Overview', '/wiki/', 'md', 'ready', $3, $4, 0, -100)",
+                kb_id,
+                user_id,
                 _OVERVIEW_TEMPLATE.format(name=body.name),
                 ["overview"],
             )
-
             await conn.execute(
-                "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, "
-                "file_type, status, content, tags, version, sort_order) "
-                "VALUES ($1, $2, 'log.md', 'Log', '/wiki/', "
-                "'md', 'ready', $3, $4, 0, 100)",
-                kb_id, user_id,
+                "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, file_type, status, content, tags, version, sort_order) "
+                "VALUES ($1, $2, 'log.md', 'Log', '/wiki/', 'md', 'ready', $3, $4, 0, 100)",
+                kb_id,
+                user_id,
                 _LOG_TEMPLATE.format(name=body.name, date=today),
                 ["log"],
             )
+            await conn.execute(
+                "INSERT INTO knowledge_base_memberships (knowledge_base_id, user_id, role) VALUES ($1, $2, 'owner') "
+                "ON CONFLICT (knowledge_base_id, user_id) DO NOTHING",
+                kb_id,
+                user_id,
+            )
+            await conn.execute(
+                "INSERT INTO knowledge_base_settings (knowledge_base_id, updated_by) VALUES ($1, $2) "
+                "ON CONFLICT (knowledge_base_id) DO NOTHING",
+                kb_id,
+                user_id,
+            )
+            row = await conn.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", kb_id, user_id)
     finally:
         await pool.release(conn)
 
@@ -302,6 +704,10 @@ async def update_knowledge_base(
     request: Request,
 ):
     pool = request.app.state.pool
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
 
     updates = []
     params = []
@@ -321,17 +727,12 @@ async def update_knowledge_base(
 
     updates.append("updated_at = now()")
     params.append(kb_id)
-    params.append(user_id)
-
-    sql = (
-        f"UPDATE knowledge_bases SET {', '.join(updates)} "
-        f"WHERE id = ${idx} AND user_id = ${idx + 1} "
-        f"RETURNING {_KB_COLUMNS}"
-    )
+    sql = f"UPDATE knowledge_bases SET {', '.join(updates)} WHERE id = ${idx} RETURNING id"
     row = await pool.fetchrow(sql, *params)
     if not row:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
-    return dict(row)
+    full_row = await pool.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", kb_id, user_id)
+    return dict(full_row)
 
 
 @router.delete("/{kb_id}", status_code=204)
@@ -341,9 +742,10 @@ async def delete_knowledge_base(
     request: Request,
 ):
     pool = request.app.state.pool
-    result = await pool.execute(
-        "DELETE FROM knowledge_bases WHERE id = $1 AND user_id = $2",
-        kb_id, user_id,
-    )
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, "owner")
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    result = await pool.execute("DELETE FROM knowledge_bases WHERE id = $1", kb_id)
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Knowledge base not found")
