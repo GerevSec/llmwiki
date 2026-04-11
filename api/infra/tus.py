@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import asyncio
 import logging
@@ -50,6 +51,17 @@ CONTENT_TYPES = {
 router = APIRouter(prefix="/v1/uploads", tags=["tus"])
 
 
+def _normalize_upload_path(path: str | None) -> str:
+    normalized = (path or "/").strip()
+    if not normalized:
+        return "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if not normalized.endswith("/"):
+        normalized += "/"
+    return re.sub(r"/+", "/", normalized)
+
+
 @dataclass
 class TusUpload:
     upload_id: str
@@ -59,6 +71,7 @@ class TusUpload:
     filename: str
     knowledge_base_id: str
     temp_path: Path
+    path: str = "/"
     last_activity: float = field(default_factory=time.time)
 
 
@@ -123,11 +136,12 @@ async def _finalize(upload: TusUpload, app_state) -> str:
         await pool.execute(
             "INSERT INTO documents (id, knowledge_base_id, user_id, filename, path, title, "
             "file_type, file_size, status) "
-            "VALUES ($1::uuid, $2::uuid, $3, $4, '/', $5, $6, $7, 'pending')",
+            "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, 'pending')",
             document_id,
             upload.knowledge_base_id,
             user_id,
             upload.filename,
+            upload.path,
             title,
             file_type,
             file_size,
@@ -249,6 +263,7 @@ async def tus_create(request: Request):
         filename=filename,
         knowledge_base_id=kb_id,
         temp_path=temp_path,
+        path=_normalize_upload_path(metadata.get("path")),
     )
     _uploads[upload_id] = upload
 

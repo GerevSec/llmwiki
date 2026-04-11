@@ -571,7 +571,7 @@ export function KBDetail({ kbId, kbName }: Props) {
     input.click()
   }
 
-  const tusUploadFile = React.useCallback((file: File): Promise<void> => {
+  const tusUploadFile = React.useCallback((file: File, targetPath: string): Promise<void> => {
     const t = getToken()
     if (!t) return Promise.reject(new Error('Not authenticated'))
 
@@ -582,6 +582,7 @@ export function KBDetail({ kbId, kbName }: Props) {
         metadata: {
           filename: file.name,
           knowledge_base_id: kbId,
+          path: targetPath,
         },
         headers: { Authorization: `Bearer ${t}` },
         onError: (error) => {
@@ -598,7 +599,7 @@ export function KBDetail({ kbId, kbName }: Props) {
     })
   }, [kbId, refetchDocuments])
 
-  const uploadFiles = React.useCallback((files: File[]) => {
+  const uploadFiles = React.useCallback((files: File[], targetPath: string = '/') => {
     const t = getToken()
     if (!t || !userId) return
 
@@ -610,7 +611,7 @@ export function KBDetail({ kbId, kbName }: Props) {
         try {
           const data = await apiFetch<DocumentListItem>(`/v1/knowledge-bases/${kbId}/documents/note`, t, {
             method: 'POST',
-            body: JSON.stringify({ filename: file.name, title, content, path: '/' }),
+            body: JSON.stringify({ filename: file.name, title, content, path: targetPath }),
           })
           setDocuments((prev) => [data, ...prev])
         } catch {
@@ -619,7 +620,7 @@ export function KBDetail({ kbId, kbName }: Props) {
       } else {
         const tusTypes = new Set(['pdf', 'pptx', 'ppt', 'docx', 'doc', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'xlsx', 'xls', 'csv', 'html', 'htm'])
         if (ext && tusTypes.has(ext)) {
-          await tusUploadFile(file)
+          await tusUploadFile(file, targetPath)
         } else {
           toast.info(`${ext} files not yet supported`)
         }
@@ -672,14 +673,11 @@ export function KBDetail({ kbId, kbName }: Props) {
     e.dataTransfer.dropEffect = 'copy'
   }
   const handleFileDrop = (e: React.DragEvent) => {
-    if (isDocumentDrag(e.dataTransfer.types)) {
-      setFileDragOver(false)
-      dragCounterRef.current = 0
-      return
-    }
-    e.preventDefault()
     dragCounterRef.current = 0
     setFileDragOver(false)
+    if (isDocumentDrag(e.dataTransfer.types)) return
+    if (e.defaultPrevented) return
+    e.preventDefault()
     const files = Array.from(e.dataTransfer.files)
     if (files.length > 0) uploadFiles(files)
   }
@@ -726,6 +724,7 @@ export function KBDetail({ kbId, kbName }: Props) {
             onCreateNote={handleCreateNote}
             onCreateFolder={handleCreateFolder}
             onUpload={handleUploadClick}
+            onUploadFiles={uploadFiles}
             onDeleteDocument={handleDeleteDocument}
             onRenameDocument={handleRenameDocument}
             onMoveDocument={handleMoveDocument}

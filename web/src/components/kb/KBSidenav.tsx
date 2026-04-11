@@ -30,6 +30,7 @@ interface Usage {
   document_count: number
   max_pages: number
   max_storage_bytes: number
+  page_limits_enabled: boolean
 }
 
 interface SourceNode {
@@ -127,6 +128,7 @@ interface KBSidenavProps {
   onCreateNote: () => void
   onCreateFolder: (name: string) => void
   onUpload: () => void
+  onUploadFiles?: (files: File[], targetPath: string) => void
   onDeleteDocument: (id: string) => void
   onRenameDocument: (id: string, newTitle: string) => void
   onMoveDocument: (docId: string, targetPath: string) => void
@@ -150,6 +152,7 @@ export function KBSidenav({
   onCreateNote,
   onCreateFolder,
   onUpload,
+  onUploadFiles,
   onDeleteDocument,
   onRenameDocument,
   onMoveDocument,
@@ -421,18 +424,31 @@ export function KBSidenav({
               rootDragOver && 'bg-primary/5 ring-1 ring-primary/40',
             )}
             onDragOver={(e) => {
-              if (!e.dataTransfer.types.includes('application/x-llmwiki-doc')) return
+              const types = e.dataTransfer.types
+              const isDoc = types.includes('application/x-llmwiki-doc')
+              const isFile = types.includes('Files')
+              if (!isDoc && !isFile) return
               e.preventDefault()
-              e.dataTransfer.dropEffect = 'move'
+              e.dataTransfer.dropEffect = isDoc ? 'move' : 'copy'
               setRootDragOver(true)
             }}
             onDragLeave={() => setRootDragOver(false)}
             onDrop={(e) => {
-              if (!e.dataTransfer.types.includes('application/x-llmwiki-doc')) return
+              const types = e.dataTransfer.types
+              const isDoc = types.includes('application/x-llmwiki-doc')
+              const isFile = types.includes('Files')
+              if (!isDoc && !isFile) return
               e.preventDefault()
               setRootDragOver(false)
-              const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
-              if (docId) onMoveDocument(docId, '/')
+              if (isDoc) {
+                const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
+                if (docId) onMoveDocument(docId, '/')
+                return
+              }
+              if (isFile && onUploadFiles) {
+                const files = Array.from(e.dataTransfer.files)
+                if (files.length > 0) onUploadFiles(files, '/')
+              }
             }}
           >
             <div className="space-y-0.5">
@@ -450,6 +466,7 @@ export function KBSidenav({
                     onDelete={onDeleteDocument}
                     onRename={onRenameDocument}
                     onMove={onMoveDocument}
+                    onUploadFiles={onUploadFiles}
                     onRequestMove={openMoveDialog}
                     onSourceDragStateChange={onSourceDragStateChange}
                     selectedIds={selectedIds}
@@ -737,6 +754,7 @@ function SourceTreeNode({
   onDelete,
   onRename,
   onMove,
+  onUploadFiles,
   onRequestMove,
   onSourceDragStateChange,
   selectedIds = new Set(),
@@ -750,6 +768,7 @@ function SourceTreeNode({
   onDelete: (id: string) => void
   onRename: (id: string, newTitle: string) => void
   onMove: (docId: string, targetPath: string) => void
+  onUploadFiles?: (files: File[], targetPath: string) => void
   onRequestMove: (doc: DocumentListItem) => void
   onSourceDragStateChange?: (dragging: boolean) => void
   selectedIds?: Set<string>
@@ -787,18 +806,34 @@ function SourceTreeNode({
         <div
           onClick={() => setExpanded((e) => !e)}
           onDragOver={(e) => {
-            if (e.dataTransfer.types.includes('application/x-llmwiki-doc')) {
-              e.preventDefault()
-              e.dataTransfer.dropEffect = 'move'
-              setDragOver(true)
-            }
+            const types = e.dataTransfer.types
+            const isDoc = types.includes('application/x-llmwiki-doc')
+            const isFile = types.includes('Files')
+            if (!isDoc && !isFile) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = isDoc ? 'move' : 'copy'
+            setDragOver(true)
           }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => {
+            const types = e.dataTransfer.types
+            const isDoc = types.includes('application/x-llmwiki-doc')
+            const isFile = types.includes('Files')
+            if (!isDoc && !isFile) return
             e.preventDefault()
             setDragOver(false)
-            const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
-            if (docId) onMove(docId, folderPath)
+            if (isDoc) {
+              const docId = e.dataTransfer.getData('application/x-llmwiki-doc')
+              if (docId) onMove(docId, folderPath)
+              return
+            }
+            if (isFile && onUploadFiles) {
+              const files = Array.from(e.dataTransfer.files)
+              if (files.length > 0) {
+                onUploadFiles(files, folderPath)
+                setExpanded(true)
+              }
+            }
           }}
           className={cn(
             'flex items-center gap-1.5 w-full text-left text-xs rounded-md px-2 py-1 transition-colors cursor-pointer',
@@ -830,6 +865,7 @@ function SourceTreeNode({
                 onDelete={onDelete}
                 onRename={onRename}
                 onMove={onMove}
+                onUploadFiles={onUploadFiles}
                 onRequestMove={onRequestMove}
                 onSourceDragStateChange={onSourceDragStateChange}
                 selectedIds={selectedIds}
@@ -947,7 +983,7 @@ function PageUsageBar() {
       .catch(() => {})
   }, [token])
 
-  if (!usage) return null
+  if (!usage || !usage.page_limits_enabled) return null
 
   const pct = Math.min(100, (usage.total_pages / usage.max_pages) * 100)
   const color =
