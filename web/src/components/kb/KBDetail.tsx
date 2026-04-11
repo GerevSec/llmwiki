@@ -690,23 +690,7 @@ export function KBDetail({ kbId, kbName }: Props) {
     (!activeSourceDocId && !!wikiActivePath && pageLoadedPath !== wikiActivePath)
 
   return (
-    <div
-      className="flex flex-col h-full relative"
-      onDragEnter={handleFileDragEnter}
-      onDragLeave={handleFileDragLeave}
-      onDragOver={handleFileDragOver}
-      onDrop={handleFileDrop}
-    >
-      {fileDragOver && (
-        <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none">
-          <div className="flex flex-col items-center gap-3 border-2 border-dashed border-primary rounded-xl px-12 py-10">
-            <UploadIcon className="size-8 text-primary" />
-            <p className="text-sm font-medium text-primary">Drop files to upload</p>
-            <p className="text-xs text-muted-foreground">PDF, Word, PowerPoint, images, and more</p>
-          </div>
-        </div>
-      )}
-
+    <div className="flex flex-col h-full">
       <div className="flex-1 overflow-hidden flex">
         <div className="w-56 shrink-0">
           <KBSidenav
@@ -733,7 +717,22 @@ export function KBDetail({ kbId, kbName }: Props) {
             onSelect={handleSelect}
           />
         </div>
-        <div className="flex-1 min-w-0">
+        <div
+          className="flex-1 min-w-0 relative"
+          onDragEnter={handleFileDragEnter}
+          onDragLeave={handleFileDragLeave}
+          onDragOver={handleFileDragOver}
+          onDrop={handleFileDrop}
+        >
+          {fileDragOver && (
+            <div className="absolute inset-3 z-50 flex items-center justify-center pointer-events-none rounded-xl border-2 border-dashed border-primary bg-primary/5">
+              <div className="flex flex-col items-center gap-2">
+                <UploadIcon className="size-6 text-primary" />
+                <p className="text-sm font-medium text-primary">Drop to upload to this wiki</p>
+                <p className="text-xs text-muted-foreground">Drop on a sidebar folder to add it there</p>
+              </div>
+            </div>
+          )}
           {showMainLoading ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 className="size-5 animate-spin text-muted-foreground" />
