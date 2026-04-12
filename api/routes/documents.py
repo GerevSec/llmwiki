@@ -368,8 +368,6 @@ async def update_document_metadata(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    if location_changed and not current_doc_rewritten:
-        updates.append("version = version + 1")
     updates.append("updated_at = now()")
     params.append(doc_id)
 
