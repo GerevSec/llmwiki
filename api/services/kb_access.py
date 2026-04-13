@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable
 from uuid import UUID
@@ -18,6 +19,26 @@ class KBAccess:
     name: str
     role: str
     owner_user_id: str
+
+
+def is_wiki_path(path: str | None) -> bool:
+    normalized = (path or "/").strip()
+    if not normalized:
+        normalized = "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if not normalized.endswith("/"):
+        normalized += "/"
+    normalized = re.sub(r"/+", "/", normalized)
+    return normalized == "/wiki/" or normalized.startswith("/wiki/")
+
+
+async def wiki_direct_editing_enabled(pool: asyncpg.Pool, kb_id: str) -> bool:
+    enabled = await pool.fetchval(
+        "SELECT COALESCE(wiki_direct_editing_enabled, false) FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
+    return bool(enabled)
 
 
 async def resolve_kb_access(

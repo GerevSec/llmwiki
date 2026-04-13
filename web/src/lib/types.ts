@@ -4,6 +4,7 @@ export interface KnowledgeBase {
   name: string
   slug: string
   role: string
+  wiki_direct_editing_enabled: boolean
   description: string | null
   source_count: number
   wiki_page_count: number

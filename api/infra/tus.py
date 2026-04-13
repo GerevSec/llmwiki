@@ -12,7 +12,7 @@ from fastapi import APIRouter, Request, HTTPException, Response
 
 from auth import get_current_user
 from config import settings
-from services.kb_access import require_kb_role
+from services.kb_access import is_wiki_path, require_kb_role, wiki_direct_editing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ CONTENT_TYPES = {
 }
 
 router = APIRouter(prefix="/v1/uploads", tags=["tus"])
+_WIKI_UPLOAD_BLOCKED_DETAIL = "Direct wiki editing is disabled for this knowledge base. Upload source files outside /wiki/ or use MCP/Claude instead."
 
 
 def _normalize_upload_path(path: str | None) -> str:
@@ -231,6 +232,9 @@ async def tus_create(request: Request):
         await require_kb_role(pool, kb_id, user_id, "owner", "admin", "editor")
     except PermissionError:
         raise HTTPException(status_code=403, detail="Knowledge base not found or not owned by you")
+    upload_path = _normalize_upload_path(metadata.get("path"))
+    if is_wiki_path(upload_path) and not await wiki_direct_editing_enabled(pool, kb_id):
+        raise HTTPException(status_code=403, detail=_WIKI_UPLOAD_BLOCKED_DETAIL)
     user_limits = await pool.fetchrow(
         "SELECT storage_limit_bytes FROM users WHERE id = $1",
         user_id,
@@ -263,7 +267,7 @@ async def tus_create(request: Request):
         filename=filename,
         knowledge_base_id=kb_id,
         temp_path=temp_path,
-        path=_normalize_upload_path(metadata.get("path")),
+        path=upload_path,
     )
     _uploads[upload_id] = upload
 

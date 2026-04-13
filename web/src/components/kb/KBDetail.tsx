@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { Upload as UploadIcon, BookOpen, ArrowUpRight, Loader2 } from 'lucide-react'
+import { Upload as UploadIcon, BookOpen, ArrowUpRight, Loader2, Lock, PencilLine, Sparkles } from 'lucide-react'
 import * as tus from 'tus-js-client'
 import { useUserStore } from '@/stores'
 import { useKBDocuments } from '@/hooks/useKBDocuments'
@@ -145,9 +145,16 @@ type Props = {
   kbId: string
   kbSlug?: string
   kbName: string
+  wikiDirectEditingEnabled: boolean
+  canEditWikiDirectly: boolean
 }
 
-export function KBDetail({ kbId, kbName }: Props) {
+export function KBDetail({
+  kbId,
+  kbName,
+  wikiDirectEditingEnabled,
+  canEditWikiDirectly,
+}: Props) {
   const router = useRouter()
   const searchParams = useSearchParams()
   const token = useUserStore((s) => s.accessToken)
@@ -171,6 +178,14 @@ export function KBDetail({ kbId, kbName }: Props) {
     () => wikiDocs.some((d) => d.path === '/wiki/' ? !SCAFFOLD_FILES.has(d.filename) : true),
     [wikiDocs],
   )
+  const hasVisibleWiki = React.useMemo(
+    () => (
+      wikiDirectEditingEnabled
+        ? wikiDocs.length > 0
+        : hasNavigableWiki
+    ),
+    [wikiDirectEditingEnabled, wikiDocs.length, hasNavigableWiki],
+  )
   const [wikiTree, setWikiTree] = React.useState<WikiNode[]>([])
   const [wikiActivePath, setWikiActivePath] = React.useState<string | null>(null)
   const [pageContent, setPageContent] = React.useState('')
@@ -179,6 +194,7 @@ export function KBDetail({ kbId, kbName }: Props) {
   const [pageLoadedPath, setPageLoadedPath] = React.useState<string | null>(null)
   const [indexLoaded, setIndexLoaded] = React.useState(false)
   const [selectionHydrated, setSelectionHydrated] = React.useState(false)
+  const [editingWikiPage, setEditingWikiPage] = React.useState(false)
 
   // Source doc selection state — synced with ?doc= query param
   const [activeSourceDocId, setActiveSourceDocId] = React.useState<string | null>(null)
@@ -325,12 +341,14 @@ export function KBDetail({ kbId, kbName }: Props) {
   }, [router])
 
   const handleWikiSelect = React.useCallback((path: string) => {
+    setEditingWikiPage(false)
     setWikiActivePath(path)
     setActiveSourceDocId(null)
     updateUrl({ pagePath: path })
   }, [updateUrl])
 
   const handleSourceSelect = React.useCallback((doc: DocumentListItem) => {
+    setEditingWikiPage(false)
     setActiveSourceDocId(doc.id)
     setWikiActivePath(null)
     clearSelection()
@@ -424,6 +442,10 @@ export function KBDetail({ kbId, kbName }: Props) {
   const activeWikiVersion = activeWikiDoc?.version ?? -1
   const activeWikiDocId = activeWikiDoc?.id ?? null
 
+  React.useEffect(() => {
+    setEditingWikiPage(false)
+  }, [activeWikiDocId, activeSourceDocId])
+
   // Fetch wiki page content — only when path changes or version bumps
   React.useEffect(() => {
     if (!wikiActivePath || !token) {
@@ -459,6 +481,7 @@ export function KBDetail({ kbId, kbName }: Props) {
   const handleWikiNavigate = React.useCallback(
     (path: string) => {
       let nextPath = path
+      setEditingWikiPage(false)
       setActiveSourceDocId(null)
       if (path.startsWith('/wiki/')) {
         nextPath = path.replace(/^\/wiki\/?/, '')
@@ -686,8 +709,8 @@ export function KBDetail({ kbId, kbName }: Props) {
     loading ||
     !selectionHydrated ||
     !urlRestored ||
-    (!activeSourceDocId && hasNavigableWiki && !wikiActivePath) ||
-    (!activeSourceDocId && !!wikiActivePath && pageLoadedPath !== wikiActivePath)
+    (!activeSourceDocId && hasVisibleWiki && !wikiActivePath) ||
+    (!activeSourceDocId && !!wikiActivePath && !editingWikiPage && pageLoadedPath !== wikiActivePath)
 
   return (
     <div className="flex flex-col h-full">
@@ -703,7 +726,7 @@ export function KBDetail({ kbId, kbName }: Props) {
             sourceDocs={sourceDocs}
             activeSourceDocId={activeSourceDocId}
             onSourceSelect={handleSourceSelect}
-            hasWiki={hasNavigableWiki}
+            hasWiki={hasVisibleWiki}
             loading={loading}
             onCreateNote={handleCreateNote}
             onCreateFolder={handleCreateFolder}
@@ -767,21 +790,80 @@ export function KBDetail({ kbId, kbName }: Props) {
             <div className="flex items-center justify-center h-full">
               <Loader2 className="size-5 animate-spin text-muted-foreground" />
             </div>
-          ) : hasNavigableWiki && wikiActivePath ? (
-            <WikiContent
-              content={pageContent}
-              title={pageTitle}
-              onNavigate={handleWikiNavigate}
-              onSourceClick={handleCitationSourceClick}
-              documents={documents}
-            />
+          ) : hasVisibleWiki && wikiActivePath ? (
+            canEditWikiDirectly && editingWikiPage && activeWikiDocId ? (
+              <NoteEditor
+                key={activeWikiDocId}
+                documentId={activeWikiDocId}
+                initialTitle={activeWikiDoc?.title ?? activeWikiDoc?.filename}
+                initialTags={activeWikiDoc?.tags}
+                initialDate={activeWikiDoc?.date}
+                initialProperties={activeWikiDoc?.metadata?.properties as Record<string, unknown> | undefined}
+                embedded
+              />
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="border-b border-border bg-background/95 px-6 py-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="inline-flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-xs font-medium text-muted-foreground">
+                        {wikiDirectEditingEnabled ? (
+                          <>
+                            <PencilLine className="size-3.5" />
+                            Direct wiki editing enabled
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="size-3.5" />
+                            Source-driven wiki
+                          </>
+                        )}
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {wikiDirectEditingEnabled
+                          ? canEditWikiDirectly
+                            ? 'Open the editor to make direct changes to this page.'
+                            : 'This wiki allows direct editing, but your current role is view-only.'
+                          : 'Direct edits are disabled here. Add sources or ask Claude via MCP to update the wiki.'}
+                      </p>
+                    </div>
+                    {canEditWikiDirectly && activeWikiDocId ? (
+                      <button
+                        onClick={() => setEditingWikiPage((current) => !current)}
+                        className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent transition-colors cursor-pointer"
+                      >
+                        <PencilLine className="size-4" />
+                        {editingWikiPage ? 'Back to preview' : 'Edit page'}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <WikiContent
+                    content={pageContent}
+                    title={pageTitle}
+                    onNavigate={handleWikiNavigate}
+                    onSourceClick={handleCitationSourceClick}
+                    documents={documents}
+                  />
+                </div>
+              </div>
+            )
           ) : (
             <div className="flex flex-col items-center justify-center h-full gap-4 px-6">
-              <BookOpen className="size-10 text-muted-foreground/20" />
+              {wikiDirectEditingEnabled ? (
+                <Sparkles className="size-10 text-muted-foreground/20" />
+              ) : (
+                <BookOpen className="size-10 text-muted-foreground/20" />
+              )}
               <div className="text-center max-w-sm">
-                <h3 className="text-base font-medium mb-1.5">No wiki yet</h3>
+                <h3 className="text-base font-medium mb-1.5">
+                  {wikiDirectEditingEnabled ? 'Wiki scaffold ready' : 'No wiki yet'}
+                </h3>
                 <p className="text-sm text-muted-foreground leading-relaxed">
-                  Add some sources, then ask Claude to compile a wiki from them.
+                  {wikiDirectEditingEnabled
+                    ? 'Edit the overview or log pages directly, or add sources and let the compile flow expand the wiki.'
+                    : 'Add some sources, then ask Claude to compile a wiki from them.'}
                 </p>
               </div>
               <div className="flex items-center gap-3 mt-2">

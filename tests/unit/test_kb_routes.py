@@ -17,6 +17,7 @@ class FakePool:
             "enabled": True,
             "provider": "openrouter",
             "model": "anthropic/claude-sonnet-4.6",
+            "wiki_direct_editing_enabled": True,
             "interval_minutes": 60,
             "max_sources": 3,
             "prompt": "",
@@ -69,6 +70,7 @@ async def test_update_compile_schedule_encrypts_secret(monkeypatch):
             provider_secret="secret-value",
             max_tool_rounds=50,
             max_tokens=50000,
+            wiki_direct_editing_enabled=True,
         ),
         "owner-1",
         request,
@@ -77,6 +79,7 @@ async def test_update_compile_schedule_encrypts_secret(monkeypatch):
     sql, args = pool.fetchrow_calls[0]
     assert "knowledge_base_settings" in sql
     assert "enc::secret-value" in args
+    assert True in args
     assert result["provider"] == "openrouter"
 
 
@@ -103,6 +106,7 @@ async def test_update_compile_schedule_requires_secret_when_enabling(monkeypatch
                 provider_secret=None,
                 max_tool_rounds=50,
                 max_tokens=50000,
+                wiki_direct_editing_enabled=False,
             ),
             "owner-1",
             request,

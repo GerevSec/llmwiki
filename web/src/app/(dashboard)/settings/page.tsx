@@ -48,6 +48,7 @@ interface CompileSchedule {
   enabled: boolean
   provider: string
   model: string | null
+  wiki_direct_editing_enabled: boolean
   interval_minutes: number
   max_sources: number
   prompt: string
@@ -288,6 +289,25 @@ function ScheduleCard({
 
           <section className="rounded-md border border-border/60 p-3 space-y-3">
             <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Periodic compile</div>
+            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-3 space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Wiki editing</div>
+              <label className="flex items-start gap-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={schedule.wiki_direct_editing_enabled}
+                  onChange={(e) => onScheduleChange(kb.id, { wiki_direct_editing_enabled: e.target.checked })}
+                  className="mt-0.5"
+                />
+                <div>
+                  <div className="font-medium text-foreground">Allow direct wiki editing in the app</div>
+                  <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                    {schedule.wiki_direct_editing_enabled
+                      ? 'Editors can open wiki pages and edit them directly.'
+                      : 'Wiki pages stay source-driven in the app. Add sources or ask Claude via MCP to update them.'}
+                  </p>
+                </div>
+              </label>
+            </div>
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -483,6 +503,7 @@ export default function SettingsPage() {
           enabled: false,
           provider: 'anthropic',
           model: null,
+          wiki_direct_editing_enabled: kb.wiki_direct_editing_enabled,
           interval_minutes: 60,
           max_sources: DEFAULT_MAX_SOURCES,
           prompt: '',
@@ -561,6 +582,7 @@ export default function SettingsPage() {
           enabled: schedule.enabled,
           provider: schedule.provider,
           model: schedule.model,
+          wiki_direct_editing_enabled: schedule.wiki_direct_editing_enabled,
           interval_minutes: schedule.interval_minutes,
           max_sources: schedule.max_sources,
           provider_secret: (schedule as CompileSchedule & { provider_secret?: string }).provider_secret,
@@ -568,7 +590,8 @@ export default function SettingsPage() {
           max_tokens: schedule.max_tokens,
         }),
       })
-      const kb = knowledgeBases.find((item) => item.id === kbId)
+      const refreshedKbs = await fetchKBs()
+      const kb = refreshedKbs.find((item) => item.id === kbId) ?? knowledgeBases.find((item) => item.id === kbId)
       if (kb) await refreshKbAdminData(kb)
       toast.success('Schedule saved')
     } catch (err) {

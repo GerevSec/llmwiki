@@ -29,6 +29,7 @@ router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 _KB_COLUMNS = "id, user_id, name, slug, description, created_at, updated_at"
 _KB_WITH_COUNTS = (
     "SELECT kb.id, kb.user_id, kb.name, kb.slug, kb.description, m.role, "
+    "  COALESCE(s.wiki_direct_editing_enabled, false) AS wiki_direct_editing_enabled, "
     "  kb.created_at, kb.updated_at, "
     "  (SELECT COUNT(*) FROM documents d "
     "   WHERE d.knowledge_base_id = kb.id AND d.path NOT LIKE '/wiki/%%' AND NOT d.archived) AS source_count, "
@@ -36,6 +37,7 @@ _KB_WITH_COUNTS = (
     "   WHERE d.knowledge_base_id = kb.id AND d.path LIKE '/wiki/%%' AND NOT d.archived) AS wiki_page_count "
     "FROM knowledge_bases kb "
     "JOIN knowledge_base_memberships m ON m.knowledge_base_id = kb.id"
+    " LEFT JOIN knowledge_base_settings s ON s.knowledge_base_id = kb.id"
 )
 
 
@@ -68,6 +70,7 @@ class UpdateCompileSchedule(BaseModel):
     provider_secret: str | None = None
     max_tool_rounds: int | None = None
     max_tokens: int | None = None
+    wiki_direct_editing_enabled: bool | None = None
 
 
 class KnowledgeBaseOut(BaseModel):
@@ -76,6 +79,7 @@ class KnowledgeBaseOut(BaseModel):
     name: str
     slug: str
     role: str
+    wiki_direct_editing_enabled: bool = False
     description: str | None = None
     source_count: int = 0
     wiki_page_count: int = 0
@@ -121,6 +125,7 @@ class KnowledgeBaseSettingsOut(BaseModel):
     enabled: bool
     provider: str
     model: str | None = None
+    wiki_direct_editing_enabled: bool = False
     interval_minutes: int
     max_sources: int
     prompt: str = ""
@@ -419,6 +424,7 @@ async def get_compile_schedule(
         "SELECT auto_compile_enabled AS enabled, compile_provider AS provider, compile_model AS model, "
         "compile_interval_minutes AS interval_minutes, compile_max_sources AS max_sources, compile_prompt AS prompt, "
         "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
+        "COALESCE(wiki_direct_editing_enabled, false) AS wiki_direct_editing_enabled, "
         "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
         "last_run_at, last_status, last_error, next_run_at "
         "FROM knowledge_base_settings WHERE knowledge_base_id = $1",
@@ -431,6 +437,7 @@ async def get_compile_schedule(
             "enabled": False,
             "provider": provider,
             "model": default_model_for_provider(provider) or None,
+            "wiki_direct_editing_enabled": False,
             "interval_minutes": 60,
             "max_sources": default_max_sources(),
             "prompt": "",
@@ -474,25 +481,36 @@ async def update_compile_schedule(
         "SELECT provider_secret_encrypted FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
     )
+    existing_direct_editing = await pool.fetchval(
+        "SELECT wiki_direct_editing_enabled FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
     provider_secret = (body.provider_secret or "").strip()
     if body.enabled and not provider_secret and not existing_secret:
         raise HTTPException(status_code=400, detail="Provider secret is required before enabling periodic compile")
     encrypted_secret = encrypt_secret(provider_secret) if provider_secret else None
     next_due = next_run_at(body.interval_minutes) if body.enabled else None
+    wiki_direct_editing_enabled = (
+        body.wiki_direct_editing_enabled
+        if body.wiki_direct_editing_enabled is not None
+        else bool(existing_direct_editing)
+    )
     row = await pool.fetchrow(
         "INSERT INTO knowledge_base_settings "
-        "(knowledge_base_id, auto_compile_enabled, compile_provider, compile_model, compile_interval_minutes, compile_max_sources, compile_prompt, compile_max_tool_rounds, compile_max_tokens, provider_secret_encrypted, provider_secret_updated_at, next_run_at, updated_by) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text, CASE WHEN $10::text IS NULL THEN NULL ELSE now() END, $11, $12) "
+        "(knowledge_base_id, auto_compile_enabled, compile_provider, compile_model, compile_interval_minutes, compile_max_sources, compile_prompt, compile_max_tool_rounds, compile_max_tokens, wiki_direct_editing_enabled, provider_secret_encrypted, provider_secret_updated_at, next_run_at, updated_by) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text, CASE WHEN $11::text IS NULL THEN NULL ELSE now() END, $12, $13) "
         "ON CONFLICT (knowledge_base_id) DO UPDATE SET "
         "auto_compile_enabled = EXCLUDED.auto_compile_enabled, compile_provider = EXCLUDED.compile_provider, compile_model = EXCLUDED.compile_model, "
         "compile_interval_minutes = EXCLUDED.compile_interval_minutes, compile_max_sources = EXCLUDED.compile_max_sources, compile_prompt = EXCLUDED.compile_prompt, "
         "compile_max_tool_rounds = EXCLUDED.compile_max_tool_rounds, compile_max_tokens = EXCLUDED.compile_max_tokens, "
+        "wiki_direct_editing_enabled = EXCLUDED.wiki_direct_editing_enabled, "
         "provider_secret_encrypted = COALESCE(EXCLUDED.provider_secret_encrypted, knowledge_base_settings.provider_secret_encrypted), "
         "provider_secret_updated_at = CASE WHEN EXCLUDED.provider_secret_encrypted IS NULL THEN knowledge_base_settings.provider_secret_updated_at ELSE now() END, "
         "next_run_at = EXCLUDED.next_run_at, updated_by = EXCLUDED.updated_by "
         "RETURNING auto_compile_enabled AS enabled, compile_provider AS provider, compile_model AS model, "
         "compile_interval_minutes AS interval_minutes, compile_max_sources AS max_sources, compile_prompt AS prompt, "
         "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
+        "COALESCE(wiki_direct_editing_enabled, false) AS wiki_direct_editing_enabled, "
         "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
         "last_run_at, last_status, last_error, next_run_at",
         kb_id,
@@ -504,6 +522,7 @@ async def update_compile_schedule(
         (body.prompt or "").strip(),
         max_tool_rounds,
         max_tokens,
+        wiki_direct_editing_enabled,
         encrypted_secret,
         next_due,
         user_id,

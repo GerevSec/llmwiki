@@ -36,5 +36,14 @@ export default function KBPage() {
     )
   }
 
-  return <KBDetail key={kb.id} kbId={kb.id} kbSlug={kb.slug} kbName={kb.name} />
+  return (
+    <KBDetail
+      key={kb.id}
+      kbId={kb.id}
+      kbSlug={kb.slug}
+      kbName={kb.name}
+      wikiDirectEditingEnabled={kb.wiki_direct_editing_enabled}
+      canEditWikiDirectly={kb.wiki_direct_editing_enabled && ['owner', 'admin', 'editor'].includes(kb.role)}
+    />
+  )
 }

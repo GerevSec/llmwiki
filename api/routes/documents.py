@@ -17,11 +17,13 @@ from services.document_links import (
     rebase_relative_markdown_links,
     rewrite_markdown_links_to_target,
 )
-from services.kb_access import require_kb_role
+from services.kb_access import is_wiki_path, require_kb_role, wiki_direct_editing_enabled
 
 router = APIRouter(tags=["documents"])
 
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.+?\n)---[ \t]*\n", re.DOTALL)
+_WIKI_EDIT_BLOCKED_DETAIL = "Direct wiki editing is disabled for this knowledge base. Add sources or use MCP/Claude instead."
+_WIKI_DELETE_BLOCKED_DETAIL = "Direct wiki editing is disabled for this knowledge base. Remove wiki pages via MCP/Claude or compile flow instead."
 
 _DOC_COLUMNS = (
     "id, knowledge_base_id, user_id, filename, path, title, "
@@ -52,6 +54,17 @@ def _normalize_path(path: str | None) -> str:
     if not normalized.endswith("/"):
         normalized += "/"
     return re.sub(r"/+", "/", normalized)
+
+
+async def _ensure_wiki_direct_editable(pool, kb_id: str, *, path: str | None, detail: str | None = None) -> None:
+    if not is_wiki_path(path):
+        return
+    if await wiki_direct_editing_enabled(pool, kb_id):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=detail or "Direct wiki editing is disabled for this knowledge base",
+    )
 
 
 class CreateNote(BaseModel):
@@ -201,6 +214,12 @@ async def create_note(
         await require_kb_role(pool, str(kb_id), user_id, "owner", "admin", "editor")
     except PermissionError:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+    await _ensure_wiki_direct_editable(
+        pool,
+        str(kb_id),
+        path=body.path,
+        detail=_WIKI_EDIT_BLOCKED_DETAIL,
+    )
 
     meta, _ = parse_frontmatter(body.content)
 
@@ -244,7 +263,7 @@ async def update_document_content(
     pool = request.app.state.pool
 
     current = await pool.fetchrow(
-        "SELECT knowledge_base_id::text AS knowledge_base_id FROM documents WHERE id = $1 AND archived = false",
+        "SELECT knowledge_base_id::text AS knowledge_base_id, path FROM documents WHERE id = $1 AND archived = false",
         doc_id,
     )
     if not current:
@@ -253,6 +272,12 @@ async def update_document_content(
         await require_kb_role(pool, current["knowledge_base_id"], user_id, "owner", "admin", "editor")
     except PermissionError:
         raise HTTPException(status_code=404, detail="Document not found")
+    await _ensure_wiki_direct_editable(
+        pool,
+        current["knowledge_base_id"],
+        path=current["path"],
+        detail=_WIKI_EDIT_BLOCKED_DETAIL,
+    )
 
     row = await pool.fetchrow(
         "UPDATE documents SET content = $1, version = version + 1, updated_at = now() "
@@ -293,8 +318,14 @@ async def update_document_metadata(
     next_filename = body.filename if body.filename is not None else current["filename"]
     next_path = _normalize_path(body.path) if body.path is not None else current["path"]
     current_path = _normalize_path(current["path"])
+    wiki_path_being_edited = current_path if is_wiki_path(current_path) else next_path
+    await _ensure_wiki_direct_editable(
+        pool,
+        str(current["knowledge_base_id"]),
+        path=wiki_path_being_edited,
+        detail=_WIKI_EDIT_BLOCKED_DETAIL,
+    )
     location_changed = next_filename != current["filename"] or next_path != current_path
-    current_doc_rewritten = False
 
     rewrites: list[tuple[str, str, str, str]] = []
     if location_changed:
@@ -327,8 +358,6 @@ async def update_document_metadata(
                 )
 
             if rewritten != doc["content"]:
-                if doc["id"] == current["id"]:
-                    current_doc_rewritten = True
                 rewrites.append((
                     str(doc["id"]),
                     rewritten,
@@ -417,7 +446,7 @@ async def bulk_delete_documents(
         return
     pool = request.app.state.pool
     rows = await pool.fetch(
-        "SELECT id::text AS id, knowledge_base_id::text AS knowledge_base_id FROM documents "
+        "SELECT id::text AS id, knowledge_base_id::text AS knowledge_base_id, path FROM documents "
         "WHERE id = ANY($1::uuid[]) AND archived = false",
         [str(i) for i in body.ids],
     )
@@ -425,6 +454,12 @@ async def bulk_delete_documents(
     for row in rows:
         try:
             await require_kb_role(pool, row["knowledge_base_id"], user_id, "owner", "admin", "editor")
+            await _ensure_wiki_direct_editable(
+                pool,
+                row["knowledge_base_id"],
+                path=row["path"],
+                detail=_WIKI_DELETE_BLOCKED_DETAIL,
+            )
             allowed_ids.append(row["id"])
         except PermissionError:
             continue
@@ -445,7 +480,7 @@ async def delete_document(
 ):
     pool = request.app.state.pool
     current = await pool.fetchrow(
-        "SELECT knowledge_base_id::text AS knowledge_base_id FROM documents WHERE id = $1 AND archived = false",
+        "SELECT knowledge_base_id::text AS knowledge_base_id, path FROM documents WHERE id = $1 AND archived = false",
         doc_id,
     )
     if not current:
@@ -454,6 +489,12 @@ async def delete_document(
         await require_kb_role(pool, current["knowledge_base_id"], user_id, "owner", "admin", "editor")
     except PermissionError:
         raise HTTPException(status_code=404, detail="Document not found")
+    await _ensure_wiki_direct_editable(
+        pool,
+        current["knowledge_base_id"],
+        path=current["path"],
+        detail=_WIKI_DELETE_BLOCKED_DETAIL,
+    )
 
     result = await pool.execute(
         "UPDATE documents SET archived = true, updated_at = now() "
