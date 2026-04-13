@@ -17,6 +17,7 @@ from services.compile_tools import (
     tool_definitions_openrouter,
 )
 from services.encryption import decrypt_secret
+from services.llm_json import loads_lenient_json
 from services.wiki_releases import create_draft_release, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -495,7 +496,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                                 wiki_release_id=target.wiki_release_id,
                             ),
                             tool_call["function"]["name"],
-                            json.loads(tool_call["function"]["arguments"] or "{}"),
+                            loads_lenient_json(tool_call["function"]["arguments"] or "{}"),
                         )
                         messages.append(
                             {

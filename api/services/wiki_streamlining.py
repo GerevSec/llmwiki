@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +9,7 @@ import httpx
 
 from config import settings
 from services.encryption import decrypt_secret
+from services.llm_json import loads_lenient_json
 from services.periodic_compile import (
     ANTHROPIC_API_URL,
     ANTHROPIC_VERSION,
@@ -58,8 +58,6 @@ class StreamliningScope:
     dirty_paths: list[str]
 
 
-_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
 DEFAULT_STREAMLINING_PROMPT = """\
 You are streamlining an existing wiki. Preserve all source-grounded information and nuance.
 Rules:
@@ -80,14 +78,10 @@ def _normalize_top_dir(full_path: str) -> str:
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        match = _JSON_BLOCK_RE.search(stripped)
-        if not match:
-            raise
-        return json.loads(match.group(1))
+    payload = loads_lenient_json(text)
+    if not isinstance(payload, dict):
+        raise json.JSONDecodeError("Expected top-level JSON object", text, 0)
+    return payload
 
 
 async def load_streamlining_target_from_settings(pool_or_conn, knowledge_base_slug: str) -> StreamliningTarget:

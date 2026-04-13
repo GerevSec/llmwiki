@@ -12,10 +12,12 @@ from services.periodic_compile import (  # noqa: E402
     CompileTarget,
     PendingSource,
     _invoke_anthropic,
+    _invoke_openrouter,
     build_compile_prompt,
     filter_pending_sources,
     run_target,
 )
+from services.wiki_streamlining import _extract_json_payload  # noqa: E402
 from api_key_auth import hash_api_key  # noqa: E402
 
 
@@ -200,6 +202,114 @@ async def test_invoke_anthropic_rejects_non_terminal_stop_reason(monkeypatch):
             "Compile now",
             CompileTarget("kb", "test-key", "", 10, "anthropic", "claude-test", 4, 1024, "user-1"),
         )
+
+
+@pytest.mark.asyncio
+async def test_invoke_openrouter_repairs_invalid_tool_argument_json(monkeypatch):
+    responses = [
+        {
+            "id": "or_1",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "write",
+                                    "arguments": '{"command":"create","path":"/wiki/foo.md","content":"The page is called "Foo"."}',
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        {
+            "id": "or_2",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "Done"},
+                }
+            ],
+        },
+    ]
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            return FakeResponse(responses.pop(0))
+
+    class AcquireCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return AcquireCtx()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_execute_tool(context, name, arguments):
+        captured["name"] = name
+        captured["arguments"] = arguments
+        return "ok"
+
+    monkeypatch.setattr("services.periodic_compile.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("services.periodic_compile._get_pool_for_tools", fake_get_pool)
+    monkeypatch.setattr("services.periodic_compile.execute_tool", fake_execute_tool)
+
+    result = await _invoke_openrouter(
+        "Compile now",
+        CompileTarget("kb", "test-key", "", 10, "openrouter", "openrouter/test", 4, 1024, "user-1", wiki_release_id="rel-1"),
+    )
+
+    assert captured["name"] == "write"
+    assert captured["arguments"] == {
+        "command": "create",
+        "path": "/wiki/foo.md",
+        "content": 'The page is called "Foo".',
+    }
+    assert result["request_id"] == "or_2"
+    assert result["stop_reason"] == "stop"
+
+
+def test_extract_json_payload_repairs_embedded_quotes_inside_code_fence():
+    payload = _extract_json_payload(
+        """```json
+{"summary":"ok","operations":[{"type":"update","target_path":"/wiki/foo.md","content":"Rename "Foo" to "Bar""}]}
+```"""
+    )
+
+    assert payload["summary"] == "ok"
+    assert payload["operations"][0]["content"] == 'Rename "Foo" to "Bar"'
 
 
 @pytest.mark.asyncio
