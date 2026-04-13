@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +76,79 @@ def _normalize_top_dir(full_path: str) -> str:
     if not relative:
         return ""
     return relative.split("/", 1)[0]
+
+
+def _normalize_page_reference(reference: str) -> str:
+    ref = (reference or "").strip()
+    if not ref:
+        return ""
+    if not ref.startswith("/"):
+        ref = f"/{ref}"
+    return ref.rstrip("/") if ref != "/" else ref
+
+
+def _reference_slug(reference: str) -> str:
+    ref = _normalize_page_reference(reference)
+    tail = ref.rsplit("/", 1)[-1]
+    tail = tail.removesuffix(".md").removesuffix(".txt")
+    tail = re.sub(r"[^a-z0-9]+", "-", tail.lower()).strip("-")
+    return tail
+
+
+def _title_slug(title: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
+
+
+async def resolve_page_reference(
+    conn: asyncpg.Connection,
+    draft_release_id: str,
+    *,
+    reference: str | None = None,
+    page_key: str | None = None,
+) -> Any | None:
+    if page_key:
+        page = next((item for item in await get_release_pages(conn, draft_release_id) if item.page_key == page_key), None)
+        if page:
+            return page
+
+    if not reference:
+        return None
+
+    normalized_ref = _normalize_page_reference(reference)
+    page = await get_release_page_by_full_path(conn, draft_release_id, normalized_ref)
+    if page:
+        return page
+
+    if "." not in normalized_ref.rsplit("/", 1)[-1]:
+        for suffix in (".md", ".txt"):
+            page = await get_release_page_by_full_path(conn, draft_release_id, f"{normalized_ref}{suffix}")
+            if page:
+                return page
+
+    slug = _reference_slug(normalized_ref)
+    candidates = []
+    for item in await get_release_pages(conn, draft_release_id):
+        full_path = item.full_path.rstrip("/")
+        item_slug = _reference_slug(full_path)
+        path_prefix = normalized_ref + "/"
+        score = 0
+        if full_path.startswith(path_prefix):
+            score = max(score, 90)
+        if item.filename in {normalized_ref.rsplit("/", 1)[-1], f"{slug}.md", f"{slug}.txt"}:
+            score = max(score, 80)
+        if item_slug == slug:
+            score = max(score, 70)
+        if _title_slug(item.title) == slug:
+            score = max(score, 60)
+        if score:
+            candidates.append((score, len(full_path), item))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda entry: (-entry[0], entry[1]))
+    best_score = candidates[0][0]
+    best = [entry[2] for entry in candidates if entry[0] == best_score]
+    return best[0] if len(best) == 1 else None
 
 
 def _extract_json_payload(text: str) -> dict[str, Any]:
@@ -160,6 +234,7 @@ async def determine_streamlining_scope(conn: asyncpg.Connection, knowledge_base_
 def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningScope) -> str:
     page_payload = [
         {
+            "page_key": page["page_key"],
             "path": page["full_path"],
             "title": page["title"],
             "tags": page["tags"],
@@ -172,6 +247,8 @@ def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningSco
         "operations": [
             {
                 "type": "merge|rename|move|split|update|create|alias",
+                "source_page_key": "uuid optional but preferred for existing pages",
+                "target_page_key": "uuid optional but preferred for existing pages",
                 "source_path": "/wiki/example.md",
                 "target_path": "/wiki/example.md",
                 "reason": "why this improves coherence",
@@ -291,10 +368,12 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
         op_type = (operation.get("type") or "").strip().lower()
         source_path = operation.get("source_path")
         target_path = operation.get("target_path")
+        source_page_key = operation.get("source_page_key")
+        target_page_key = operation.get("target_page_key")
         if op_type in {"rename", "move"}:
             if not source_path or not target_path:
                 raise RuntimeError("rename/move operation requires source_path and target_path")
-            page = await get_release_page_by_full_path(conn, draft_release_id, source_path)
+            page = await resolve_page_reference(conn, draft_release_id, reference=source_path, page_key=source_page_key)
             if not page:
                 raise RuntimeError(f"Source page not found for operation: {source_path}")
             target_dir = target_path.rsplit("/", 1)[0] + "/" if "/" in target_path.lstrip("/") else "/wiki/"
@@ -313,7 +392,7 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
         elif op_type == "update":
             if not target_path:
                 raise RuntimeError("update operation requires target_path")
-            page = await get_release_page_by_full_path(conn, draft_release_id, target_path)
+            page = await resolve_page_reference(conn, draft_release_id, reference=target_path, page_key=target_page_key)
             existing_key = page.page_key if page else None
             target_dir = target_path.rsplit("/", 1)[0] + "/" if "/" in target_path.lstrip("/") else "/wiki/"
             target_filename = target_path.rsplit("/", 1)[-1]
@@ -348,10 +427,13 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
         elif op_type == "merge":
             if not source_path or not target_path:
                 raise RuntimeError("merge operation requires source_path and target_path")
-            source_page = await get_release_page_by_full_path(conn, draft_release_id, source_path)
-            target_page = await get_release_page_by_full_path(conn, draft_release_id, target_path)
+            source_page = await resolve_page_reference(conn, draft_release_id, reference=source_path, page_key=source_page_key)
+            target_page = await resolve_page_reference(conn, draft_release_id, reference=target_path, page_key=target_page_key)
             if not source_page or not target_page:
-                raise RuntimeError("merge paths must both exist")
+                raise RuntimeError(f"merge paths must both exist (source={source_path!r}, target={target_path!r})")
+            if source_page.page_key == target_page.page_key:
+                changed_paths.append(f"{target_page.path}{target_page.filename}")
+                continue
             merged = await merge_release_pages(
                 conn,
                 draft_release_id,
@@ -363,7 +445,7 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
         elif op_type == "split":
             if not source_path or not operation.get("children"):
                 raise RuntimeError("split operation requires source_path and children")
-            source_page = await get_release_page_by_full_path(conn, draft_release_id, source_path)
+            source_page = await resolve_page_reference(conn, draft_release_id, reference=source_path, page_key=source_page_key)
             if not source_page:
                 raise RuntimeError(f"split source page not found: {source_path}")
             children = await split_release_page(conn, draft_release_id, source_page_key=source_page.page_key, children=operation["children"])
@@ -372,7 +454,7 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
         elif op_type == "alias":
             if not source_path or not target_path:
                 raise RuntimeError("alias operation requires source_path and target_path")
-            target_page = await get_release_page_by_full_path(conn, draft_release_id, target_path)
+            target_page = await resolve_page_reference(conn, draft_release_id, reference=target_path, page_key=target_page_key)
             if not target_page:
                 raise RuntimeError(f"alias target page not found: {target_path}")
             alias_dir = source_path.rsplit("/", 1)[0] + "/" if "/" in source_path.lstrip("/") else "/wiki/"

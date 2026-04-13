@@ -198,3 +198,67 @@ async def test_streamline_now_merges_duplicate_pages(client, pool, monkeypatch):
     )
     assert run["status"] == "succeeded"
     assert run["scope_type"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_streamline_now_resolves_fuzzy_merge_paths(client, pool, monkeypatch):
+    weird_source_id = "ffffffff-1111-1111-1111-111111111111"
+    weird_target_id = "99999999-1111-1111-1111-111111111111"
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) VALUES ($1, $2, $3, 'voice-recording--ai-tools-encountered.md', 'Voice, Recording & AI Tools Encountered', '/wiki/voice-recording-tools.md/', 'md', 'ready', $4, 1)",
+        weird_source_id,
+        KB_A_ID,
+        USER_A_ID,
+        '# Voice Tools\n\nShared fact one.\n\nUnique source fact.',
+    )
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) VALUES ($1, $2, $3, 'product-strategy--positioning--be.md', 'Product Strategy & Positioning — Be', '/wiki/product-strategy-and-positioning.md/', 'md', 'ready', $4, 1)",
+        weird_target_id,
+        KB_A_ID,
+        USER_A_ID,
+        '# Product Strategy\n\nShared fact one.\n\nUnique target fact.',
+    )
+
+    conn = await pool.acquire()
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM wiki_release_pages WHERE release_id IN (SELECT id FROM wiki_releases WHERE knowledge_base_id = $1)",
+                KB_A_ID,
+            )
+            await conn.execute("DELETE FROM wiki_releases WHERE knowledge_base_id = $1", KB_A_ID)
+            await conn.execute("UPDATE knowledge_base_settings SET active_wiki_release_id = NULL WHERE knowledge_base_id = $1", KB_A_ID)
+            await ensure_initial_wiki_release(conn, KB_A_ID)
+    finally:
+        await pool.release(conn)
+
+    async def fake_invoke(prompt, target):
+        return {
+            "request_id": "stream-2",
+            "text": """
+            {
+              "summary": "Merged by semantic path reference.",
+              "operations": [
+                {
+                  "type": "merge",
+                  "source_path": "/wiki/voice-recording-tools.md",
+                  "target_path": "/wiki/product-strategy-and-positioning.md",
+                  "reason": "Consolidate duplicate structure"
+                }
+              ]
+            }
+            """,
+        }
+
+    monkeypatch.setattr("services.wiki_streamlining._invoke_streamlining_provider", fake_invoke)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/streamline-now?force_full=true",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    merged_target = await pool.fetchrow("SELECT content, archived FROM documents WHERE id = $1", weird_target_id)
+    merged_source = await pool.fetchrow("SELECT archived FROM documents WHERE id = $1", weird_source_id)
+    assert "Unique source fact." in merged_target["content"]
+    assert merged_source["archived"] is True
