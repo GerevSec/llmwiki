@@ -23,6 +23,11 @@ from services.periodic_compile import (
     next_run_at,
     run_target,
 )
+from services.wiki_releases import ensure_initial_wiki_release, resolve_alias
+from services.wiki_streamlining import (
+    load_streamlining_target_from_settings,
+    run_streamlining_target,
+)
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 
@@ -71,6 +76,12 @@ class UpdateCompileSchedule(BaseModel):
     max_tool_rounds: int | None = None
     max_tokens: int | None = None
     wiki_direct_editing_enabled: bool | None = None
+    streamlining_enabled: bool | None = None
+    streamlining_interval_minutes: int | None = None
+    streamlining_provider: str | None = None
+    streamlining_model: str | None = None
+    streamlining_prompt: str | None = None
+    streamlining_provider_secret: str | None = None
 
 
 class KnowledgeBaseOut(BaseModel):
@@ -120,6 +131,19 @@ class CompileRunOut(BaseModel):
     finished_at: datetime | None = None
 
 
+class StreamliningRunOut(BaseModel):
+    id: UUID
+    status: str
+    model: str
+    provider: str
+    scope_type: str
+    response_excerpt: str | None = None
+    error_message: str | None = None
+    quality_report: dict | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
 class KnowledgeBaseSettingsOut(BaseModel):
     knowledge_base: str
     enabled: bool
@@ -136,6 +160,17 @@ class KnowledgeBaseSettingsOut(BaseModel):
     last_status: str | None = None
     last_error: str | None = None
     next_run_at: datetime | None = None
+    streamlining_enabled: bool = False
+    streamlining_interval_minutes: int = 1440
+    streamlining_provider: str | None = None
+    streamlining_model: str | None = None
+    streamlining_prompt: str = ""
+    has_streamlining_provider_secret: bool = False
+    last_streamlining_at: datetime | None = None
+    last_streamlining_status: str | None = None
+    last_streamlining_error: str | None = None
+    next_streamlining_at: datetime | None = None
+    active_wiki_release_id: UUID | None = None
 
 
 def _slugify(name: str) -> str:
@@ -409,6 +444,27 @@ async def list_compile_runs(
     return [dict(row) for row in rows]
 
 
+@router.get("/{kb_id}/streamlining-runs", response_model=list[StreamliningRunOut])
+async def list_streamlining_runs(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+    limit: int = Query(10, ge=1, le=50),
+):
+    pool = request.app.state.pool
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    rows = await pool.fetch(
+        "SELECT id, status, model, provider, scope_type, response_excerpt, error_message, quality_report, started_at, finished_at "
+        "FROM streamlining_runs WHERE knowledge_base_id = $1 ORDER BY started_at DESC LIMIT $2",
+        kb_id,
+        limit,
+    )
+    return [dict(row) for row in rows]
+
+
 @router.get("/{kb_id}/compile-schedule", response_model=KnowledgeBaseSettingsOut)
 async def get_compile_schedule(
     kb_id: UUID,
@@ -426,7 +482,13 @@ async def get_compile_schedule(
         "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
         "COALESCE(wiki_direct_editing_enabled, false) AS wiki_direct_editing_enabled, "
         "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
-        "last_run_at, last_status, last_error, next_run_at "
+        "last_run_at, last_status, last_error, next_run_at, "
+        "COALESCE(streamlining_enabled, false) AS streamlining_enabled, "
+        "COALESCE(streamlining_interval_minutes, 1440) AS streamlining_interval_minutes, "
+        "COALESCE(streamlining_provider, compile_provider) AS streamlining_provider, "
+        "streamlining_model, streamlining_prompt, "
+        "(COALESCE(streamlining_provider_secret_encrypted, provider_secret_encrypted) IS NOT NULL) AS has_streamlining_provider_secret, "
+        "last_streamlining_at, last_streamlining_status, last_streamlining_error, next_streamlining_at, active_wiki_release_id "
         "FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
     )
@@ -444,6 +506,12 @@ async def get_compile_schedule(
             "max_tool_rounds": default_max_tool_rounds(),
             "max_tokens": default_max_tokens(),
             "has_provider_secret": False,
+            "streamlining_enabled": False,
+            "streamlining_interval_minutes": 1440,
+            "streamlining_provider": provider,
+            "streamlining_model": default_model_for_provider(provider) or None,
+            "streamlining_prompt": "",
+            "has_streamlining_provider_secret": False,
         }
     return {"knowledge_base": kb["slug"], **dict(row)}
 
@@ -481,6 +549,10 @@ async def update_compile_schedule(
         "SELECT provider_secret_encrypted FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
     )
+    existing_streamlining_secret = await pool.fetchval(
+        "SELECT streamlining_provider_secret_encrypted FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
     existing_direct_editing = await pool.fetchval(
         "SELECT wiki_direct_editing_enabled FROM knowledge_base_settings WHERE knowledge_base_id = $1",
         kb_id,
@@ -495,10 +567,23 @@ async def update_compile_schedule(
         if body.wiki_direct_editing_enabled is not None
         else bool(existing_direct_editing)
     )
+    streamlining_enabled = bool(body.streamlining_enabled) if body.streamlining_enabled is not None else False
+    streamlining_interval_minutes = body.streamlining_interval_minutes or 1440
+    if streamlining_interval_minutes < 60 or streamlining_interval_minutes > 10080:
+        raise HTTPException(status_code=400, detail="Streamlining interval must be between 60 minutes and 7 days")
+    streamlining_provider = (body.streamlining_provider or provider).strip().lower()
+    if streamlining_provider not in {"anthropic", "openrouter"}:
+        raise HTTPException(status_code=400, detail="Unsupported streamlining provider")
+    streamlining_model = (body.streamlining_model or "").strip() or default_model_for_provider(streamlining_provider)
+    streamlining_secret = (body.streamlining_provider_secret or "").strip()
+    if streamlining_enabled and not streamlining_secret and not existing_streamlining_secret and not provider_secret and not existing_secret:
+        raise HTTPException(status_code=400, detail="Provider secret is required before enabling streamlining")
+    encrypted_streamlining_secret = encrypt_secret(streamlining_secret) if streamlining_secret else None
+    next_streamlining_due = next_run_at(streamlining_interval_minutes) if streamlining_enabled else None
     row = await pool.fetchrow(
         "INSERT INTO knowledge_base_settings "
-        "(knowledge_base_id, auto_compile_enabled, compile_provider, compile_model, compile_interval_minutes, compile_max_sources, compile_prompt, compile_max_tool_rounds, compile_max_tokens, wiki_direct_editing_enabled, provider_secret_encrypted, provider_secret_updated_at, next_run_at, updated_by) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text, CASE WHEN $11::text IS NULL THEN NULL ELSE now() END, $12, $13) "
+        "(knowledge_base_id, auto_compile_enabled, compile_provider, compile_model, compile_interval_minutes, compile_max_sources, compile_prompt, compile_max_tool_rounds, compile_max_tokens, wiki_direct_editing_enabled, provider_secret_encrypted, provider_secret_updated_at, next_run_at, streamlining_enabled, streamlining_interval_minutes, streamlining_provider, streamlining_model, streamlining_prompt, streamlining_provider_secret_encrypted, next_streamlining_at, updated_by) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text, CASE WHEN $11::text IS NULL THEN NULL ELSE now() END, $12, $13, $14, $15, $16, $17, $18::text, $19, $20) "
         "ON CONFLICT (knowledge_base_id) DO UPDATE SET "
         "auto_compile_enabled = EXCLUDED.auto_compile_enabled, compile_provider = EXCLUDED.compile_provider, compile_model = EXCLUDED.compile_model, "
         "compile_interval_minutes = EXCLUDED.compile_interval_minutes, compile_max_sources = EXCLUDED.compile_max_sources, compile_prompt = EXCLUDED.compile_prompt, "
@@ -506,13 +591,23 @@ async def update_compile_schedule(
         "wiki_direct_editing_enabled = EXCLUDED.wiki_direct_editing_enabled, "
         "provider_secret_encrypted = COALESCE(EXCLUDED.provider_secret_encrypted, knowledge_base_settings.provider_secret_encrypted), "
         "provider_secret_updated_at = CASE WHEN EXCLUDED.provider_secret_encrypted IS NULL THEN knowledge_base_settings.provider_secret_updated_at ELSE now() END, "
-        "next_run_at = EXCLUDED.next_run_at, updated_by = EXCLUDED.updated_by "
+        "next_run_at = EXCLUDED.next_run_at, "
+        "streamlining_enabled = EXCLUDED.streamlining_enabled, streamlining_interval_minutes = EXCLUDED.streamlining_interval_minutes, "
+        "streamlining_provider = EXCLUDED.streamlining_provider, streamlining_model = EXCLUDED.streamlining_model, streamlining_prompt = EXCLUDED.streamlining_prompt, "
+        "streamlining_provider_secret_encrypted = COALESCE(EXCLUDED.streamlining_provider_secret_encrypted, knowledge_base_settings.streamlining_provider_secret_encrypted), "
+        "next_streamlining_at = EXCLUDED.next_streamlining_at, updated_by = EXCLUDED.updated_by "
         "RETURNING auto_compile_enabled AS enabled, compile_provider AS provider, compile_model AS model, "
         "compile_interval_minutes AS interval_minutes, compile_max_sources AS max_sources, compile_prompt AS prompt, "
         "compile_max_tool_rounds AS max_tool_rounds, compile_max_tokens AS max_tokens, "
         "COALESCE(wiki_direct_editing_enabled, false) AS wiki_direct_editing_enabled, "
         "(provider_secret_encrypted IS NOT NULL) AS has_provider_secret, "
-        "last_run_at, last_status, last_error, next_run_at",
+        "last_run_at, last_status, last_error, next_run_at, "
+        "COALESCE(streamlining_enabled, false) AS streamlining_enabled, "
+        "COALESCE(streamlining_interval_minutes, 1440) AS streamlining_interval_minutes, "
+        "COALESCE(streamlining_provider, compile_provider) AS streamlining_provider, "
+        "streamlining_model, streamlining_prompt, "
+        "(COALESCE(streamlining_provider_secret_encrypted, provider_secret_encrypted) IS NOT NULL) AS has_streamlining_provider_secret, "
+        "last_streamlining_at, last_streamlining_status, last_streamlining_error, next_streamlining_at, active_wiki_release_id",
         kb_id,
         body.enabled,
         provider,
@@ -525,6 +620,13 @@ async def update_compile_schedule(
         wiki_direct_editing_enabled,
         encrypted_secret,
         next_due,
+        streamlining_enabled,
+        streamlining_interval_minutes,
+        streamlining_provider,
+        streamlining_model,
+        (body.streamlining_prompt or "").strip(),
+        encrypted_streamlining_secret,
+        next_streamlining_due,
         user_id,
     )
     return {"knowledge_base": kb["slug"], **dict(row)}
@@ -565,6 +667,50 @@ async def compile_knowledge_base_now(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return result
+
+
+@router.post("/{kb_id}/streamline-now")
+async def streamline_knowledge_base_now(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+    force_full: bool = Query(False),
+):
+    pool = request.app.state.pool
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    try:
+        target = await load_streamlining_target_from_settings(pool, kb["slug"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        return await run_streamlining_target(pool, target, force_full=force_full, manual=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/{kb_id}/resolve-wiki-path")
+async def resolve_wiki_path(
+    kb_id: UUID,
+    path: str,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        await require_kb_role(pool, str(kb_id), user_id, "viewer", "editor", "admin", "owner")
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    conn = await pool.acquire()
+    try:
+        resolved = await resolve_alias(conn, str(kb_id), full_path=path if path.startswith("/") else f"/{path}")
+    finally:
+        await pool.release(conn)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"path": resolved}
 
 
 # ── Write routes (service role via pool) ──
@@ -635,6 +781,7 @@ async def create_knowledge_base(
                 kb_id,
                 user_id,
             )
+            await ensure_initial_wiki_release(conn, str(kb_id), actor="create")
             row = await conn.fetchrow(f"{_KB_WITH_COUNTS} WHERE kb.id = $1 AND m.user_id = $2", kb_id, user_id)
     finally:
         await pool.release(conn)

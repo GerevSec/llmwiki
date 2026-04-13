@@ -8,6 +8,12 @@ from fnmatch import fnmatch
 from typing import Any
 
 from services.kb_access import require_kb_access
+from services.wiki_releases import (
+    delete_release_page,
+    get_release_page_by_full_path,
+    get_release_pages,
+    upsert_release_page,
+)
 
 MAX_LIST = 50
 MAX_SEARCH = 20
@@ -20,6 +26,7 @@ class ToolContext:
     pool: Any
     user_id: str
     knowledge_base_slug: str
+    wiki_release_id: str | None = None
 
 
 def tool_definitions_anthropic() -> list[dict[str, Any]]:
@@ -212,6 +219,31 @@ async def tool_read(
     sections: list[str] | None = None,
 ) -> str:
     kb = await _resolve_kb(context)
+    if context.wiki_release_id and path.startswith("/wiki/"):
+        release_pages = await get_release_pages(context.pool, context.wiki_release_id)
+        if "*" in path or "?" in path:
+            glob_pat = "/" + path.lstrip("/") if not path.startswith("/") else path
+            matched = [page for page in release_pages if fnmatch(page.path + page.filename, glob_pat)]
+            if not matched:
+                return f"No documents matching `{path}`."
+            parts = []
+            chars = 0
+            for page in matched:
+                page_content = (page.content or "")[:5000]
+                chars += len(page_content)
+                if chars > MAX_BATCH_CHARS:
+                    break
+                parts.append(f"## {page.path}{page.filename}\n\n{page_content}")
+            return "\n\n".join(parts)
+
+        page = await get_release_page_by_full_path(context.pool, context.wiki_release_id, path)
+        if not page:
+            return f"Document '{path}' not found."
+        content = page.content or ""
+        if sections:
+            content = _extract_sections(content, sections)
+        return f"{page.path}{page.filename}\n\n{content}"
+
     if "*" in path or "?" in path:
         docs = await context.pool.fetch(
             "SELECT filename, path, content, page_count FROM documents "
@@ -268,6 +300,7 @@ async def tool_write(
 ) -> str:
     kb = await _resolve_kb(context, ("owner", "admin", "editor"))
     tags = tags or []
+    wiki_path = path.startswith("/wiki/") if path else False
     if command == "create":
         if not title:
             return "Error: title is required."
@@ -277,6 +310,17 @@ async def tool_write(
         filename = re.sub(r"[^\w\s\-.]", "", title.lower().replace(" ", "-"))
         if not filename.endswith(".md"):
             filename += ".md"
+        if context.wiki_release_id and wiki_path:
+            row = await upsert_release_page(
+                context.pool,
+                context.wiki_release_id,
+                path=dir_path,
+                filename=filename,
+                title=title,
+                content=content,
+                tags=tags,
+            )
+            return f"Created `{row.path}{row.filename}`"
         row = await context.pool.fetchrow(
             "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, file_type, status, content, tags, version) "
             "VALUES ($1, $2, $3, $4, $5, 'md', 'ready', $6, $7, 0) RETURNING path, filename",
@@ -293,6 +337,30 @@ async def tool_write(
     clean_path = path.lstrip("/")
     dir_path = "/" + clean_path.rsplit("/", 1)[0] + "/" if "/" in clean_path else "/"
     filename = clean_path.rsplit("/", 1)[1] if "/" in clean_path else clean_path
+    if context.wiki_release_id and wiki_path:
+        page = await get_release_page_by_full_path(context.pool, context.wiki_release_id, path)
+        if not page:
+            return f"Document '{path}' not found."
+        if command == "str_replace":
+            if old_text not in (page.content or ""):
+                return "Error: old_text not found."
+            new_content = (page.content or "").replace(old_text, new_text, 1)
+        elif command == "append":
+            new_content = (page.content or "") + "\n\n" + content
+        else:
+            return f"Unknown command: {command}"
+        await upsert_release_page(
+            context.pool,
+            context.wiki_release_id,
+            path=page.path,
+            filename=page.filename,
+            title=page.title,
+            content=new_content,
+            tags=page.tags,
+            sort_order=page.sort_order,
+            page_key=page.page_key,
+        )
+        return f"Updated `{path}`"
     doc = await context.pool.fetchrow(
         "SELECT id, content FROM documents WHERE knowledge_base_id = $1 AND filename = $2 AND path = $3 AND NOT archived",
         kb["id"],
@@ -323,6 +391,19 @@ async def tool_delete(context: ToolContext, path: str) -> str:
     kb = await _resolve_kb(context, ("owner", "admin", "editor"))
     if not path:
         return "Error: path is required."
+    if context.wiki_release_id and path.startswith("/wiki/"):
+        release_pages = await get_release_pages(context.pool, context.wiki_release_id)
+        if "*" in path or "?" in path:
+            glob_pat = "/" + path.lstrip("/") if not path.startswith("/") else path
+            matched = [page for page in release_pages if fnmatch(page.path + page.filename, glob_pat)]
+        else:
+            matched = [page for page in release_pages if page.path + page.filename == ("/" + path.lstrip("/"))]
+        deletable = [page for page in matched if (page.path, page.filename) not in PROTECTED_FILES]
+        if not deletable:
+            return "No deletable documents matched."
+        for page in deletable:
+            await delete_release_page(context.pool, context.wiki_release_id, page.page_key)
+        return "\n".join(f"Deleted {page.path}{page.filename}" for page in deletable)
     docs = await context.pool.fetch(
         "SELECT id, path, filename FROM documents WHERE knowledge_base_id = $1 AND NOT archived ORDER BY path, filename",
         kb["id"],

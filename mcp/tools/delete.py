@@ -1,7 +1,15 @@
 from mcp.server.fastmcp import FastMCP, Context
 
-from db import scoped_query, scoped_queryrow, service_execute
+from db import scoped_query, scoped_queryrow, service_execute, get_pool
 from .helpers import get_user_id, require_kb_role, glob_match, resolve_path
+from .wiki_release import (
+    create_draft_release,
+    delete_release_page,
+    get_release_pages,
+    publish_release,
+    prune_old_releases,
+    record_dirty_scope,
+)
 
 _PROTECTED_FILES = {("/wiki/", "overview.md"), ("/wiki/", "log.md")}
 
@@ -71,6 +79,31 @@ def register(mcp: FastMCP) -> None:
         if not deletable:
             names = ", ".join(f"`{d['path']}{d['filename']}`" for d in protected)
             return f"Cannot delete {names} — these are structural wiki pages. Use `write` to edit their content instead."
+
+        if all(d["path"].startswith("/wiki/") for d in deletable):
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    draft_release_id, _ = await create_draft_release(conn, kb["id"], created_by="mcp")
+                    draft_pages = await get_release_pages(conn, draft_release_id)
+                    by_path = {page.path + page.filename: page for page in draft_pages}
+                    deleted_paths: list[str] = []
+                    for d in deletable:
+                        page = by_path.get(d["path"] + d["filename"])
+                        if not page:
+                            continue
+                        await delete_release_page(conn, draft_release_id, page.page_key)
+                        deleted_paths.append(f"{page.path}{page.filename}")
+                        await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_delete")
+                    await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                    await prune_old_releases(conn, kb["id"])
+            lines = [f"Deleted {len(deletable)} document(s):\n"]
+            for d in deletable:
+                lines.append(f"  {d['path']}{d['filename']}")
+            if protected:
+                names = ", ".join(f"`{d['path']}{d['filename']}`" for d in protected)
+                lines.append(f"\nSkipped (protected): {names}")
+            return "\n".join(lines)
 
         doc_ids = [str(d["id"]) for d in deletable]
         await service_execute(

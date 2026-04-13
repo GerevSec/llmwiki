@@ -18,6 +18,17 @@ from services.document_links import (
     rewrite_markdown_links_to_target,
 )
 from services.kb_access import is_wiki_path, require_kb_role, wiki_direct_editing_enabled
+from services.wiki_releases import (
+    apply_non_wiki_link_rewrites,
+    create_draft_release,
+    delete_release_page,
+    get_release_page_by_page_key,
+    publish_release,
+    record_dirty_scope,
+    rename_release_page,
+    upsert_release_page,
+    prune_old_releases,
+)
 
 router = APIRouter(tags=["documents"])
 
@@ -65,6 +76,12 @@ async def _ensure_wiki_direct_editable(pool, kb_id: str, *, path: str | None, de
         status_code=403,
         detail=detail or "Direct wiki editing is disabled for this knowledge base",
     )
+
+
+def _wiki_publish_http_error(exc: RuntimeError) -> HTTPException:
+    detail = str(exc)
+    status_code = 409 if "stale" in detail.lower() or "already in progress" in detail.lower() else 400
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 class CreateNote(BaseModel):
@@ -234,6 +251,43 @@ async def create_note(
     if isinstance(meta.get("tags"), list):
         tags = [str(t) for t in meta["tags"] if t is not None]
 
+    if is_wiki_path(body.path):
+        conn = await pool.acquire()
+        try:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(
+                    conn,
+                    str(kb_id),
+                    created_by="manual",
+                )
+                page = await upsert_release_page(
+                    conn,
+                    draft_release_id,
+                    path=body.path,
+                    filename=body.filename,
+                    title=title,
+                    content=body.content,
+                    tags=tags,
+                )
+                await publish_release(
+                    conn,
+                    str(kb_id),
+                    draft_release_id,
+                    actor_user_id=user_id,
+                    mode="manual",
+                )
+                await record_dirty_scope(conn, str(kb_id), full_path=f"{page.path}{page.filename}", reason="manual_edit")
+                await prune_old_releases(conn, str(kb_id))
+                row = await conn.fetchrow(
+                    f"SELECT {_DOC_COLUMNS} FROM documents WHERE id = $1::uuid",
+                    page.page_key,
+                )
+        except RuntimeError as exc:
+            raise _wiki_publish_http_error(exc) from exc
+        finally:
+            await pool.release(conn)
+        return dict(row)
+
     conn = await pool.acquire()
     try:
         async with conn.transaction():
@@ -278,6 +332,48 @@ async def update_document_content(
         path=current["path"],
         detail=_WIKI_EDIT_BLOCKED_DETAIL,
     )
+
+    if is_wiki_path(current["path"]):
+        conn = await pool.acquire()
+        try:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(
+                    conn,
+                    current["knowledge_base_id"],
+                    created_by="manual",
+                )
+                page = await get_release_page_by_page_key(conn, draft_release_id, str(doc_id))
+                if not page:
+                    raise HTTPException(status_code=404, detail="Wiki page not found")
+                await upsert_release_page(
+                    conn,
+                    draft_release_id,
+                    path=page.path,
+                    filename=page.filename,
+                    title=page.title,
+                    content=body.content,
+                    tags=page.tags,
+                    sort_order=page.sort_order,
+                    page_key=page.page_key,
+                )
+                await publish_release(
+                    conn,
+                    current["knowledge_base_id"],
+                    draft_release_id,
+                    actor_user_id=user_id,
+                    mode="manual",
+                )
+                await record_dirty_scope(conn, current["knowledge_base_id"], full_path=f"{page.path}{page.filename}", reason="manual_edit")
+                await prune_old_releases(conn, current["knowledge_base_id"])
+                row = await conn.fetchrow(
+                    "SELECT id, content, version FROM documents WHERE id = $1::uuid",
+                    doc_id,
+                )
+        except RuntimeError as exc:
+            raise _wiki_publish_http_error(exc) from exc
+        finally:
+            await pool.release(conn)
+        return dict(row)
 
     row = await pool.fetchrow(
         "UPDATE documents SET content = $1, version = version + 1, updated_at = now() "
@@ -326,6 +422,68 @@ async def update_document_metadata(
         detail=_WIKI_EDIT_BLOCKED_DETAIL,
     )
     location_changed = next_filename != current["filename"] or next_path != current_path
+
+    if is_wiki_path(wiki_path_being_edited):
+        current_full_path = build_document_location(current_path, current["filename"])
+        next_full_path = build_document_location(next_path, next_filename)
+        conn = await pool.acquire()
+        try:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(
+                    conn,
+                    str(current["knowledge_base_id"]),
+                    created_by="manual",
+                )
+                page = await get_release_page_by_page_key(conn, draft_release_id, str(doc_id))
+                if not page:
+                    raise HTTPException(status_code=404, detail="Wiki page not found")
+                if location_changed:
+                    updated_page = await rename_release_page(
+                        conn,
+                        draft_release_id,
+                        str(current["knowledge_base_id"]),
+                        page_key=str(doc_id),
+                        new_path=next_path,
+                        new_filename=next_filename,
+                        new_title=body.title if body.title is not None else page.title,
+                        tags=body.tags if body.tags is not None else page.tags,
+                    )
+                    await apply_non_wiki_link_rewrites(
+                        conn,
+                        str(current["knowledge_base_id"]),
+                        old_target=current_full_path,
+                        new_target=next_full_path,
+                    )
+                else:
+                    updated_page = await upsert_release_page(
+                        conn,
+                        draft_release_id,
+                        path=page.path,
+                        filename=page.filename,
+                        title=body.title if body.title is not None else page.title,
+                        content=page.content,
+                        tags=body.tags if body.tags is not None else page.tags,
+                        sort_order=page.sort_order,
+                        page_key=page.page_key,
+                    )
+                await publish_release(
+                    conn,
+                    str(current["knowledge_base_id"]),
+                    draft_release_id,
+                    actor_user_id=user_id,
+                    mode="manual",
+                )
+                await record_dirty_scope(conn, str(current["knowledge_base_id"]), full_path=f"{updated_page.path}{updated_page.filename}", reason="manual_edit")
+                await prune_old_releases(conn, str(current["knowledge_base_id"]))
+                row = await conn.fetchrow(
+                    f"SELECT {_DOC_COLUMNS} FROM documents WHERE id = $1::uuid",
+                    doc_id,
+                )
+        except RuntimeError as exc:
+            raise _wiki_publish_http_error(exc) from exc
+        finally:
+            await pool.release(conn)
+        return dict(row)
 
     rewrites: list[tuple[str, str, str, str]] = []
     if location_changed:
@@ -465,10 +623,16 @@ async def bulk_delete_documents(
             continue
     if not allowed_ids:
         return
+    wiki_ids = [row["id"] for row in rows if row["id"] in allowed_ids and is_wiki_path(row["path"])]
+    non_wiki_ids = [item for item in allowed_ids if item not in wiki_ids]
+    for wiki_id in wiki_ids:
+        await delete_document(UUID(wiki_id), user_id, request)
+    if not non_wiki_ids:
+        return
     await pool.execute(
         "UPDATE documents SET archived = true, updated_at = now() "
         "WHERE id = ANY($1::uuid[])",
-        allowed_ids,
+        non_wiki_ids,
     )
 
 
@@ -495,6 +659,34 @@ async def delete_document(
         path=current["path"],
         detail=_WIKI_DELETE_BLOCKED_DETAIL,
     )
+
+    if is_wiki_path(current["path"]):
+        conn = await pool.acquire()
+        try:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(
+                    conn,
+                    current["knowledge_base_id"],
+                    created_by="manual",
+                )
+                page = await get_release_page_by_page_key(conn, draft_release_id, str(doc_id))
+                if not page:
+                    raise HTTPException(status_code=404, detail="Wiki page not found")
+                await delete_release_page(conn, draft_release_id, str(doc_id))
+                await publish_release(
+                    conn,
+                    current["knowledge_base_id"],
+                    draft_release_id,
+                    actor_user_id=user_id,
+                    mode="manual",
+                )
+                await record_dirty_scope(conn, current["knowledge_base_id"], full_path=f"{page.path}{page.filename}", reason="manual_delete")
+                await prune_old_releases(conn, current["knowledge_base_id"])
+        except RuntimeError as exc:
+            raise _wiki_publish_http_error(exc) from exc
+        finally:
+            await pool.release(conn)
+        return
 
     result = await pool.execute(
         "UPDATE documents SET archived = true, updated_at = now() "

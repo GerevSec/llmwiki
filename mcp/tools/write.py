@@ -4,8 +4,16 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from db import scoped_queryrow, service_queryrow, service_execute
+from db import scoped_queryrow, service_queryrow, service_execute, get_pool
 from .helpers import get_user_id, require_kb_role, deep_link, resolve_path
+from .wiki_release import (
+    create_draft_release,
+    get_release_page_by_full_path,
+    publish_release,
+    prune_old_releases,
+    record_dirty_scope,
+    upsert_release_page,
+)
 
 _ASSET_EXTENSIONS = {".svg", ".csv", ".json", ".xml", ".html"}
 
@@ -53,6 +61,30 @@ async def _create_note(
 
     note_date = date_str or date.today().isoformat()
 
+    if dir_path.startswith("/wiki/") and not asset_ext:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(conn, kb["id"], created_by="mcp")
+                page = await upsert_release_page(
+                    conn,
+                    draft_release_id,
+                    path=dir_path,
+                    filename=filename,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                )
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
+                await prune_old_releases(conn, kb["id"])
+        link = deep_link(kb["slug"], dir_path, filename)
+        return (
+            f"Created **{title}** at `{dir_path}{filename}`\n"
+            f"Tags: {', '.join(tags)} | Date: {note_date}\n"
+            f"[View in Supavault]({link})\n\nRemember to cite sources using footnotes: `[^1]: source-file.pdf, p.X`"
+        )
+
     doc = await service_queryrow(
         "INSERT INTO documents (knowledge_base_id, user_id, filename, title, path, "
         "file_type, status, content, tags, version) "
@@ -82,6 +114,37 @@ async def _edit_note(user_id: str, kb: dict, path: str, old_text: str, new_text:
         return "Error: old_text is required for str_replace."
 
     dir_path, filename = resolve_path(path)
+    if dir_path.startswith("/wiki/"):
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(conn, kb["id"], created_by="mcp")
+                page = await get_release_page_by_full_path(conn, draft_release_id, path)
+                if not page:
+                    return f"Document '{path}' not found."
+                content = page.content or ""
+                count = content.count(old_text)
+                if count == 0:
+                    return "Error: no match found for old_text."
+                if count > 1:
+                    return f"Error: found {count} matches for old_text. Provide more context to match exactly once."
+                new_content = content.replace(old_text, new_text, 1)
+                await upsert_release_page(
+                    conn,
+                    draft_release_id,
+                    path=page.path,
+                    filename=page.filename,
+                    title=page.title,
+                    content=new_content,
+                    tags=page.tags,
+                    sort_order=page.sort_order,
+                    page_key=page.page_key,
+                )
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
+                await prune_old_releases(conn, kb["id"])
+        link = deep_link(kb["slug"], dir_path, filename)
+        return f"Edited `{path}`. Replaced 1 occurrence.\n[View in Supavault]({link})"
 
     doc = await scoped_queryrow(
         user_id,
@@ -112,6 +175,31 @@ async def _edit_note(user_id: str, kb: dict, path: str, old_text: str, new_text:
 
 async def _append_note(user_id: str, kb: dict, path: str, content: str) -> str:
     dir_path, filename = resolve_path(path)
+    if dir_path.startswith("/wiki/"):
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                draft_release_id, _ = await create_draft_release(conn, kb["id"], created_by="mcp")
+                page = await get_release_page_by_full_path(conn, draft_release_id, path)
+                if not page:
+                    return f"Document '{path}' not found."
+                new_content = (page.content or "") + "\n\n" + content
+                await upsert_release_page(
+                    conn,
+                    draft_release_id,
+                    path=page.path,
+                    filename=page.filename,
+                    title=page.title,
+                    content=new_content,
+                    tags=page.tags,
+                    sort_order=page.sort_order,
+                    page_key=page.page_key,
+                )
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
+                await prune_old_releases(conn, kb["id"])
+        link = deep_link(kb["slug"], dir_path, filename)
+        return f"Appended to `{path}`.\n[View in Supavault]({link})"
 
     doc = await scoped_queryrow(
         user_id,

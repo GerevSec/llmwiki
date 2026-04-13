@@ -3,8 +3,12 @@
 import * as React from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useKBStore } from '@/stores'
+import { useUserStore } from '@/stores'
 import { useKBDocuments } from '@/hooks/useKBDocuments'
 import { Loader2 } from 'lucide-react'
+import { getPublicEnv } from '@/lib/public-env'
+
+const API_URL = getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
 
 function normalizeRequestedPath(pathSegments: string[] | undefined): string {
   if (!pathSegments || pathSegments.length === 0) return '/'
@@ -25,8 +29,10 @@ export default function FilePage() {
     () => knowledgeBases.find((k) => k.slug === params.slug),
     [knowledgeBases, params.slug]
   )
+  const token = useUserStore((s) => s.accessToken)
 
   const { documents, loading: docsLoading } = useKBDocuments(kb?.id ?? '')
+  const [resolvedAliasPath, setResolvedAliasPath] = React.useState<string | null>(null)
 
   const requestedPath = React.useMemo(
     () => normalizeRequestedPath(params.path),
@@ -51,6 +57,27 @@ export default function FilePage() {
   }, [documents, requestedPath, legacyDocNumber])
 
   React.useEffect(() => {
+    let cancelled = false
+    setResolvedAliasPath(null)
+    if (!kb?.id || !token || document || !requestedPath.startsWith('/wiki/')) return
+
+    fetch(`${API_URL.replace(/\/$/, '')}/v1/knowledge-bases/${kb.id}/resolve-wiki-path?path=${encodeURIComponent(requestedPath)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok) return null
+        return await res.json()
+      })
+      .then((payload) => {
+        if (cancelled || !payload?.path) return
+        setResolvedAliasPath(payload.path)
+      })
+      .catch(() => {})
+
+    return () => { cancelled = true }
+  }, [document, kb?.id, requestedPath, token])
+
+  React.useEffect(() => {
     if (kbLoading || !kb || docsLoading || !document) return
 
     const fullPath = buildDocumentPath(document.path, document.filename)
@@ -67,6 +94,14 @@ export default function FilePage() {
 
     router.replace(`/wikis/${params.slug}`)
   }, [kbLoading, kb, docsLoading, document, params.slug, router])
+
+  React.useEffect(() => {
+    if (!resolvedAliasPath || !kb || docsLoading) return
+    const redirected = documents.find((d) => buildDocumentPath(d.path, d.filename) === resolvedAliasPath)
+    if (!redirected) return
+    const wikiPath = buildDocumentPath(redirected.path, redirected.filename).replace(/^\/wiki\/?/, '')
+    router.replace(`/wikis/${params.slug}?page=${encodeURIComponent(wikiPath)}`)
+  }, [resolvedAliasPath, kb, docsLoading, documents, params.slug, router])
 
   if (kbLoading || (kb && docsLoading) || document) {
     return (

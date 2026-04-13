@@ -60,6 +60,17 @@ interface CompileSchedule {
   last_status: string | null
   last_error: string | null
   next_run_at: string | null
+  streamlining_enabled: boolean
+  streamlining_interval_minutes: number
+  streamlining_provider: string | null
+  streamlining_model: string | null
+  streamlining_prompt: string
+  has_streamlining_provider_secret: boolean
+  streamlining_provider_secret?: string
+  last_streamlining_at: string | null
+  last_streamlining_status: string | null
+  last_streamlining_error: string | null
+  next_streamlining_at: string | null
 }
 
 interface CompilePreview {
@@ -145,10 +156,12 @@ function ScheduleCard({
   members,
   saving,
   running,
+  runningStreamlining,
   deleting,
   onScheduleChange,
   onSaveSchedule,
   onCompileNow,
+  onStreamlineNow,
   onCreateInvite,
   onUpdateMember,
   onRemoveMember,
@@ -161,10 +174,12 @@ function ScheduleCard({
   members: Member[]
   saving: boolean
   running: boolean
+  runningStreamlining: boolean
   deleting: boolean
   onScheduleChange: (kbId: string, patch: Partial<CompileSchedule>) => void
   onSaveSchedule: (kbId: string) => void
   onCompileNow: (kbId: string, kbName: string) => void
+  onStreamlineNow: (kbId: string, kbName: string) => void
   onCreateInvite: (kbId: string, email: string, role: string) => void
   onUpdateMember: (kbId: string, memberId: string, role: string) => void
   onRemoveMember: (kbId: string, memberId: string) => void
@@ -215,6 +230,14 @@ function ScheduleCard({
                 )}
               </HoverCardContent>
             </HoverCard>
+            <button
+              onClick={() => onStreamlineNow(kb.id, kb.name)}
+              disabled={runningStreamlining}
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50 cursor-pointer"
+            >
+              {runningStreamlining ? <Loader2 className="size-4 animate-spin" /> : null}
+              {runningStreamlining ? 'Streamlining…' : 'Streamline now'}
+            </button>
           </div>
         )}
       </div>
@@ -408,6 +431,74 @@ function ScheduleCard({
                 Save schedule
               </button>
             </div>
+            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-3 space-y-3">
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Wiki streamlining</div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={schedule.streamlining_enabled}
+                  onChange={(e) => onScheduleChange(kb.id, { streamlining_enabled: e.target.checked })}
+                />
+                Enable periodic streamlining
+              </label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="text-sm">
+                  <span className="mb-1 block text-muted-foreground">Provider</span>
+                  <select
+                    value={schedule.streamlining_provider ?? schedule.provider}
+                    onChange={(e) => onScheduleChange(kb.id, { streamlining_provider: e.target.value })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openrouter">OpenRouter</option>
+                  </select>
+                </label>
+                <label className="text-sm">
+                  <span className="mb-1 block text-muted-foreground">Model</span>
+                  <input
+                    value={schedule.streamlining_model ?? ''}
+                    onChange={(e) => onScheduleChange(kb.id, { streamlining_model: e.target.value || null })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="text-sm">
+                  <span className="mb-1 block text-muted-foreground">Every N minutes</span>
+                  <input
+                    type="number"
+                    min={60}
+                    max={10080}
+                    value={schedule.streamlining_interval_minutes}
+                    onChange={(e) => onScheduleChange(kb.id, { streamlining_interval_minutes: Number(e.target.value) })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="text-sm">
+                  <span className="mb-1 block text-muted-foreground">Provider API key / secret</span>
+                  <input
+                    type="password"
+                    placeholder={schedule.has_streamlining_provider_secret ? 'Configured — enter a new secret to rotate' : 'Leave blank to reuse compile secret'}
+                    onChange={(e) => onScheduleChange(kb.id, { streamlining_provider_secret: e.target.value })}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+              </div>
+              <label className="block text-sm">
+                <span className="mb-1 block text-muted-foreground">Prompt override</span>
+                <textarea
+                  value={schedule.streamlining_prompt}
+                  onChange={(e) => onScheduleChange(kb.id, { streamlining_prompt: e.target.value })}
+                  rows={4}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <div className="text-xs text-muted-foreground">
+                {schedule.next_streamlining_at
+                  ? `Next streamlining: ${new Date(schedule.next_streamlining_at).toLocaleString()}`
+                  : schedule.streamlining_enabled
+                    ? 'Next streamlining will be scheduled after save.'
+                    : 'Streamlining is disabled.'}
+              </div>
+            </div>
             {kb.role === 'owner' && (
               <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-3 text-sm">
                 <div className="font-medium text-foreground">Danger zone</div>
@@ -475,6 +566,7 @@ export default function SettingsPage() {
   const [usage, setUsage] = React.useState<Usage | null>(null)
   const [configCopied, setConfigCopied] = React.useState(false)
   const [runningKbId, setRunningKbId] = React.useState<string | null>(null)
+  const [runningStreamliningKbId, setRunningStreamliningKbId] = React.useState<string | null>(null)
   const [savingScheduleKbId, setSavingScheduleKbId] = React.useState<string | null>(null)
   const [deletingKbId, setDeletingKbId] = React.useState<string | null>(null)
   const [deleteDialog, setDeleteDialog] = React.useState<{ kbId: string; kbName: string } | null>(null)
@@ -514,6 +606,16 @@ export default function SettingsPage() {
           last_status: null,
           last_error: null,
           next_run_at: null,
+          streamlining_enabled: false,
+          streamlining_interval_minutes: 1440,
+          streamlining_provider: 'anthropic',
+          streamlining_model: null,
+          streamlining_prompt: '',
+          has_streamlining_provider_secret: false,
+          last_streamlining_at: null,
+          last_streamlining_status: null,
+          last_streamlining_error: null,
+          next_streamlining_at: null,
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
       ])
@@ -570,6 +672,22 @@ export default function SettingsPage() {
     }
   }
 
+  const handleStreamlineNow = async (kbId: string, kbName: string) => {
+    if (!token) return
+    setRunningStreamliningKbId(kbId)
+    try {
+      const result = await apiFetch<{ status: string; scope_type?: string }>(`/v1/knowledge-bases/${kbId}/streamline-now?force_full=true`, token, { method: 'POST' })
+      if (result.status === 'skipped') toast.success(`No streamlining changes needed for ${kbName}`)
+      else toast.success(`Streamlining completed for ${kbName}`)
+      const kb = knowledgeBases.find((item) => item.id === kbId)
+      if (kb) await refreshKbAdminData(kb)
+    } catch (err) {
+      toast.error((err as Error).message || 'Streamlining failed')
+    } finally {
+      setRunningStreamliningKbId(null)
+    }
+  }
+
   const handleSaveSchedule = async (kbId: string) => {
     if (!token) return
     const schedule = schedules[kbId]
@@ -588,6 +706,12 @@ export default function SettingsPage() {
           provider_secret: (schedule as CompileSchedule & { provider_secret?: string }).provider_secret,
           max_tool_rounds: schedule.max_tool_rounds,
           max_tokens: schedule.max_tokens,
+          streamlining_enabled: schedule.streamlining_enabled,
+          streamlining_interval_minutes: schedule.streamlining_interval_minutes,
+          streamlining_provider: schedule.streamlining_provider,
+          streamlining_model: schedule.streamlining_model,
+          streamlining_prompt: schedule.streamlining_prompt,
+          streamlining_provider_secret: (schedule as CompileSchedule & { streamlining_provider_secret?: string }).streamlining_provider_secret,
         }),
       })
       const refreshedKbs = await fetchKBs()
@@ -729,10 +853,12 @@ export default function SettingsPage() {
               members={membersByKb[kb.id] || []}
               saving={savingScheduleKbId === kb.id}
               running={runningKbId === kb.id}
+              runningStreamlining={runningStreamliningKbId === kb.id}
               deleting={deletingKbId === kb.id}
               onScheduleChange={onScheduleChange}
               onSaveSchedule={handleSaveSchedule}
               onCompileNow={handleCompileNow}
+              onStreamlineNow={handleStreamlineNow}
               onCreateInvite={handleCreateInvite}
               onUpdateMember={handleUpdateMember}
               onRemoveMember={handleRemoveMember}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +17,7 @@ from services.compile_tools import (
     tool_definitions_openrouter,
 )
 from services.encryption import decrypt_secret
+from services.wiki_releases import create_draft_release, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -49,6 +50,8 @@ class CompileTarget:
     max_tokens: int
     actor_user_id: str
     interval_minutes: int | None = None
+    wiki_release_id: str | None = None
+    knowledge_base_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,23 +310,46 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 provider=target.provider,
                 sources=[_serialize_pending_source(source) for source in pending],
             )
+            draft_release_id, _base_release_id = await create_draft_release(
+                conn,
+                kb["id"],
+                created_by="compile",
+                created_by_run_id=run_id,
+            )
             prompt = build_compile_prompt(kb["slug"], pending, target.prompt)
             try:
-                response = await _invoke_provider(prompt, target)
+                response = await _invoke_provider(
+                    prompt,
+                    replace(
+                        target,
+                        wiki_release_id=draft_release_id,
+                        knowledge_base_id=kb["id"],
+                    ),
+                )
             except Exception as exc:
                 await _finish_run(conn, run_id, "failed", error_message=str(exc))
                 await _update_kb_settings_run_state(conn, kb["id"], "failed", str(exc), advance_schedule, target.interval_minutes)
                 raise
 
+            quality_report = await publish_release(
+                conn,
+                kb["id"],
+                draft_release_id,
+                actor_user_id=target.actor_user_id,
+                mode="compile",
+            )
             await _mark_sources_compiled(conn, run_id, kb["id"], pending)
             await _finish_run(conn, run_id, "succeeded", response_excerpt=response["text_excerpt"])
             await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
+            for source in pending:
+                await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")
             return {
                 "knowledge_base": kb["slug"],
                 "status": "succeeded",
                 "source_count": len(pending),
                 "stop_reason": response["stop_reason"],
                 "request_id": response["request_id"],
+                "quality_report": quality_report,
             }
         finally:
             await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", f"compile:{kb['id']}")
@@ -368,7 +394,6 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
     tools = tool_definitions_anthropic()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
-    tool_context = ToolContext(pool=None, user_id=target.actor_user_id, knowledge_base_slug=target.knowledge_base)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             response = await client.post(
@@ -391,21 +416,28 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
             if stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": content_blocks})
                 tool_results = []
-                for block in content_blocks:
-                    if block.get("type") != "tool_use":
-                        continue
-                    result_text = await execute_tool(
-                        ToolContext(pool=await _get_pool_for_tools(), user_id=target.actor_user_id, knowledge_base_slug=target.knowledge_base),
-                        block["name"],
-                        block.get("input"),
-                    )
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block["id"],
-                            "content": result_text,
-                        }
-                    )
+                tool_pool = await _get_pool_for_tools()
+                async with tool_pool.acquire() as tool_conn:
+                    for block in content_blocks:
+                        if block.get("type") != "tool_use":
+                            continue
+                        result_text = await execute_tool(
+                            ToolContext(
+                                pool=tool_conn,
+                                user_id=target.actor_user_id,
+                                knowledge_base_slug=target.knowledge_base,
+                                wiki_release_id=target.wiki_release_id,
+                            ),
+                            block["name"],
+                            block.get("input"),
+                        )
+                        tool_results.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block["id"],
+                                "content": result_text,
+                            }
+                        )
                 messages.append({"role": "user", "content": tool_results})
                 continue
             if stop_reason not in ANTHROPIC_SUCCESS_STOP_REASONS:
@@ -425,7 +457,6 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
     tools = tool_definitions_openrouter()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
-    tool_pool = await _get_pool_for_tools()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             response = await client.post(
@@ -453,20 +484,27 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                         "tool_calls": tool_calls,
                     }
                 )
-                for tool_call in tool_calls:
-                    result_text = await execute_tool(
-                        ToolContext(pool=tool_pool, user_id=target.actor_user_id, knowledge_base_slug=target.knowledge_base),
-                        tool_call["function"]["name"],
-                        json.loads(tool_call["function"]["arguments"] or "{}"),
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_call["function"]["name"],
-                            "content": result_text,
-                        }
-                    )
+                tool_pool = await _get_pool_for_tools()
+                async with tool_pool.acquire() as tool_conn:
+                    for tool_call in tool_calls:
+                        result_text = await execute_tool(
+                            ToolContext(
+                                pool=tool_conn,
+                                user_id=target.actor_user_id,
+                                knowledge_base_slug=target.knowledge_base,
+                                wiki_release_id=target.wiki_release_id,
+                            ),
+                            tool_call["function"]["name"],
+                            json.loads(tool_call["function"]["arguments"] or "{}"),
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_call["function"]["name"],
+                                "content": result_text,
+                            }
+                        )
                 continue
             if finish_reason not in OPENROUTER_SUCCESS_FINISH_REASONS:
                 raise RuntimeError(f"OpenRouter compile did not complete successfully (finish_reason={finish_reason})")
