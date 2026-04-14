@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ from services.periodic_compile import (  # noqa: E402
     _new_compile_telemetry,
     _openrouter_completion_succeeded,
     _openrouter_message_text,
+    _run_timeout_seconds,
     build_compile_prompt,
     filter_pending_sources,
     run_target,
@@ -208,6 +210,22 @@ class TestPeriodicCompileHelpers:
 
         assert _compile_abort_reason(target, telemetry) is None
         assert telemetry["last_meaningful_progress_at"] is not None
+
+    def test_recompile_uses_longer_run_timeout_budget(self):
+        target = CompileTarget(
+            "kb",
+            "key",
+            "",
+            10,
+            "openrouter",
+            "model",
+            10,
+            1024,
+            "user-1",
+            reset_wiki=True,
+        )
+
+        assert _run_timeout_seconds(target) > _run_timeout_seconds(replace(target, reset_wiki=False))
 
     def test_openrouter_completion_accepts_nonempty_message_when_finish_reason_missing(self):
         message = {"content": "AUTOMATION SUMMARY\n- Updated wiki"}

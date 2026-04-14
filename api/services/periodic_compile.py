@@ -148,6 +148,12 @@ def _build_recompile_batch_instructions(batch_index: int, total_batches: int) ->
     )
 
 
+def _run_timeout_seconds(target: CompileTarget) -> int:
+    if target.reset_wiki:
+        return settings.LLMWIKI_RECOMPILE_RUN_TIMEOUT_SECONDS
+    return settings.LLMWIKI_COMPILE_RUN_TIMEOUT_SECONDS
+
+
 def filter_pending_sources(
     document_rows: list[dict[str, Any]],
     checkpoint_versions: dict[str, int],
@@ -467,7 +473,7 @@ async def load_target_from_settings(pool_or_conn, knowledge_base_slug: str) -> C
 def _compile_abort_reason(target: CompileTarget, telemetry: dict[str, Any]) -> str | None:
     if target.run_started_at:
         elapsed = (datetime.now(UTC) - target.run_started_at).total_seconds()
-        if elapsed > settings.LLMWIKI_COMPILE_RUN_TIMEOUT_SECONDS:
+        if elapsed > _run_timeout_seconds(target):
             telemetry["abort_reason"] = "run_timeout"
             return "Compile aborted after exceeding total run timeout without completing"
     if telemetry.get("no_progress_rounds", 0) >= settings.LLMWIKI_COMPILE_NO_PROGRESS_ROUNDS:
