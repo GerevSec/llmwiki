@@ -231,3 +231,68 @@ async def test_recompile_from_scratch_resets_checkpoints_and_rebuilds_wiki(clien
     assert checkpoint_count == 1
     assert active_release is not None
     assert active_release_pages >= 0
+
+
+@pytest.mark.asyncio
+async def test_recompile_from_scratch_clears_stale_required_page_links(client, pool, monkeypatch):
+    stale_page_ids = [
+        "bbbbbbbb-1111-1111-1111-111111111111",
+        "cccccccc-1111-1111-1111-111111111111",
+        "dddddddd-1111-1111-1111-111111111111",
+        "eeeeeeee-1111-1111-1111-111111111111",
+        "ffffffff-1111-1111-1111-111111111111",
+    ]
+    stale_links = "\n".join(
+        f"- [Stale {idx}](/wiki/stale/topic-{idx}.md)"
+        for idx in range(1, 6)
+    )
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+        "VALUES ('99999999-1111-1111-1111-111111111111', $1, $2, 'overview.md', 'Overview', '/wiki/', 'md', 'ready', $3, 1)",
+        KB_A_ID,
+        USER_A_ID,
+        f'# Overview\n\nLegacy topic map:\n{stale_links}',
+    )
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+        "VALUES ('88888888-1111-1111-1111-111111111111', $1, $2, 'log.md', 'Log', '/wiki/', 'md', 'ready', '# Log\n\nLegacy compile log.', 1)",
+        KB_A_ID,
+        USER_A_ID,
+    )
+    for idx, page_id in enumerate(stale_page_ids, start=1):
+        await pool.execute(
+            "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+            "VALUES ($1, $2, $3, $4, $5, '/wiki/stale/', 'md', 'ready', $6, 1)",
+            page_id,
+            KB_A_ID,
+            USER_A_ID,
+            f"topic-{idx}.md",
+            f"Stale {idx}",
+            f"# Stale {idx}",
+        )
+
+    async def fake_invoke(prompt, target):
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-reset-links",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Reset wiki",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/recompile-from-scratch",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    overview_content = await pool.fetchval(
+        "SELECT content FROM documents WHERE knowledge_base_id = $1 AND path = '/wiki/' AND filename = 'overview.md'",
+        KB_A_ID,
+    )
+    log_content = await pool.fetchval(
+        "SELECT content FROM documents WHERE knowledge_base_id = $1 AND path = '/wiki/' AND filename = 'log.md'",
+        KB_A_ID,
+    )
+    assert overview_content == "# Overview\n\n"
+    assert log_content == "# Log\n\n"

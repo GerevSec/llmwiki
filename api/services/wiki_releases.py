@@ -109,6 +109,11 @@ def _page_slug(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
 
 
+def _reset_required_page_content(title: str | None, filename: str) -> str:
+    heading = (title or filename.removesuffix(".md").removesuffix(".txt").replace("-", " ").replace("_", " ")).strip()
+    return f"# {heading or 'Untitled'}\n\n"
+
+
 def _parse_destination(raw_destination: str) -> tuple[str, str, bool] | None:
     destination = raw_destination.strip()
     if not destination:
@@ -406,13 +411,29 @@ async def create_draft_release(
             active_release_id,
         )
     else:
-        await conn.execute(
-            "INSERT INTO wiki_release_pages (release_id, page_key, path, filename, title, content, tags, sort_order) "
-            "SELECT $1::uuid, page_key, path, filename, title, content, tags, sort_order "
-            "FROM wiki_release_pages WHERE release_id = $2::uuid AND (path, filename) IN (('/wiki/', 'overview.md'), ('/wiki/', 'log.md'))",
-            release_id,
+        required_rows = await conn.fetch(
+            "SELECT page_key::text AS page_key, path, filename, title, tags, sort_order "
+            "FROM wiki_release_pages WHERE release_id = $1::uuid AND (path, filename) IN (('/wiki/', 'overview.md'), ('/wiki/', 'log.md'))",
             active_release_id,
         )
+        if required_rows:
+            await conn.executemany(
+                "INSERT INTO wiki_release_pages (release_id, page_key, path, filename, title, content, tags, sort_order) "
+                "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::text[], $8)",
+                [
+                    (
+                        release_id,
+                        row["page_key"],
+                        _normalize_path(row["path"]),
+                        row["filename"],
+                        row["title"],
+                        _reset_required_page_content(row["title"], row["filename"]),
+                        list(row["tags"] or []),
+                        row["sort_order"] or 0,
+                    )
+                    for row in required_rows
+                ],
+            )
     return release_id, active_release_id
 
 
