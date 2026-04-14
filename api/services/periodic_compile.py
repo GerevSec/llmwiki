@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -57,6 +58,7 @@ class CompileTarget:
     run_started_at: datetime | None = None
     force_all_sources: bool = False
     reset_wiki: bool = False
+    pending_source_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,6 +265,40 @@ def _tool_signature(tool_name: str, arguments: dict[str, Any] | None) -> str:
     return f"{tool_name}:{json.dumps(arguments or {}, sort_keys=True, default=str)}"
 
 
+def _normalize_compile_tool_path(path: str | None) -> str:
+    if not path:
+        return ""
+    cleaned = path.strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    return re.sub(r"/+", "/", cleaned.rstrip("/"))
+
+
+def _compile_tool_made_meaningful_progress(
+    target: CompileTarget,
+    tool_name: str,
+    arguments: dict[str, Any] | None,
+    result_text: str,
+    seen_source_reads: set[str],
+) -> bool:
+    if _tool_result_made_progress(tool_name, result_text):
+        return True
+    if tool_name != "read":
+        return False
+    normalized_path = _normalize_compile_tool_path((arguments or {}).get("path"))
+    if not normalized_path:
+        return False
+    if normalized_path in seen_source_reads:
+        return False
+    pending_paths = {item.rstrip("/") for item in target.pending_source_paths}
+    if normalized_path in pending_paths:
+        seen_source_reads.add(normalized_path)
+        return True
+    return False
+
+
 async def _update_run_telemetry(
     conn: asyncpg.Connection,
     run_id: str,
@@ -449,6 +485,7 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                         knowledge_base_id=kb["id"],
                         run_id=run_id,
                         run_started_at=datetime.now(UTC),
+                        pending_source_paths=tuple(source.full_path for source in pending),
                     ),
                 )
 
@@ -523,6 +560,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
     telemetry = _new_compile_telemetry()
     seen_tool_signatures: set[str] = set()
+    seen_source_reads: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
@@ -575,7 +613,6 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                         if signature not in seen_tool_signatures:
                             seen_tool_signatures.add(signature)
                             telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
-                            progress_made = True
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -586,7 +623,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                             tool_name,
                             tool_input,
                         )
-                        if _tool_result_made_progress(tool_name, result_text):
+                        if _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads):
                             progress_made = True
                         tool_results.append(
                             {
@@ -630,6 +667,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
     telemetry = _new_compile_telemetry()
     seen_tool_signatures: set[str] = set()
+    seen_source_reads: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
@@ -680,7 +718,6 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                         if signature not in seen_tool_signatures:
                             seen_tool_signatures.add(signature)
                             telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
-                            progress_made = True
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -691,7 +728,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                             tool_name,
                             tool_input,
                         )
-                        if _tool_result_made_progress(tool_name, result_text):
+                        if _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads):
                             progress_made = True
                         messages.append(
                             {

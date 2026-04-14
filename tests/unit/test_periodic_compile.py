@@ -11,6 +11,7 @@ sys.path.append(str(ROOT / "mcp"))
 from services.periodic_compile import (  # noqa: E402
     CompileTarget,
     PendingSource,
+    _compile_tool_made_meaningful_progress,
     _invoke_anthropic,
     _invoke_openrouter,
     build_compile_prompt,
@@ -121,6 +122,26 @@ class TestPeriodicCompileHelpers:
 
     def test_hash_api_key_is_stable(self):
         assert hash_api_key("sv_test_key") == hash_api_key("sv_test_key")
+
+    def test_meaningful_progress_counts_pending_source_reads_once(self):
+        target = CompileTarget(
+            "kb",
+            "key",
+            "",
+            10,
+            "openrouter",
+            "model",
+            10,
+            1024,
+            "user-1",
+            pending_source_paths=("/docs/source.md",),
+        )
+        seen: set[str] = set()
+
+        assert _compile_tool_made_meaningful_progress(target, "read", {"path": "/docs/source.md"}, "Read ok", seen) is True
+        assert _compile_tool_made_meaningful_progress(target, "read", {"path": "/docs/source.md"}, "Read ok", seen) is False
+        assert _compile_tool_made_meaningful_progress(target, "search", {"query": "x"}, "Found stuff", seen) is False
+        assert _compile_tool_made_meaningful_progress(target, "write", {"path": "/wiki/a.md"}, "Updated `/wiki/a.md`", seen) is True
 
 
 @pytest.mark.asyncio
