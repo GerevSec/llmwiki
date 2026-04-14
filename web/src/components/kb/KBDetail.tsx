@@ -73,7 +73,8 @@ function buildTreeFromDocs(docs: DocumentListItem[]): WikiNode[] {
   const childPages = new Map<string, Array<{ title: string; path: string }>>()
 
   for (const doc of sorted) {
-    const relative = (doc.path + doc.filename).replace(/^\/wiki\/?/, '')
+    let relative = (doc.path + doc.filename).replace(/^\/wiki\/?/, '')
+    relative = relative.replace(/^([^/]+\.(md|txt|json))\//i, '')
     const parts = relative.split('/')
     const title =
       doc.title ||

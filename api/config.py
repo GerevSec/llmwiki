@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     LLMWIKI_COMPILE_MAX_TOOL_ROUNDS: int = 50
     LLMWIKI_COMPILE_DEFAULT_MAX_TOKENS: int = 50_000
     LLMWIKI_COMPILE_DRY_RUN: bool = False
+    LLMWIKI_COMPILE_RUN_TIMEOUT_SECONDS: int = 900
+    LLMWIKI_COMPILE_NO_PROGRESS_ROUNDS: int = 8
+    LLMWIKI_COMPILE_STALE_AFTER_SECONDS: int = 1800
 
     QUOTA_MAX_PAGES: int = 500  # per-user page limit (free tier)
     QUOTA_MAX_PAGES_PER_DOC: int = 300  # max pages per single document

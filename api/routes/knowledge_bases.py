@@ -114,6 +114,10 @@ class CompileNowOut(BaseModel):
     request_id: str | None = None
 
 
+class RecompileNowOut(CompileNowOut):
+    reset_source_count: int = 0
+
+
 class CompilePreviewOut(BaseModel):
     knowledge_base: str
     pending_source_count: int
@@ -127,6 +131,8 @@ class CompileRunOut(BaseModel):
     source_count: int
     response_excerpt: str | None = None
     error_message: str | None = None
+    telemetry: dict | None = None
+    last_progress_at: datetime | None = None
     started_at: datetime
     finished_at: datetime | None = None
 
@@ -436,7 +442,7 @@ async def list_compile_runs(
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
     rows = await pool.fetch(
-        "SELECT id, status, model, provider, source_count, response_excerpt, error_message, started_at, finished_at "
+        "SELECT id, status, model, provider, source_count, response_excerpt, error_message, telemetry, last_progress_at, started_at, finished_at "
         "FROM compile_runs WHERE knowledge_base_id = $1 ORDER BY started_at DESC LIMIT $2",
         kb_id,
         limit,
@@ -667,6 +673,72 @@ async def compile_knowledge_base_now(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return result
+
+
+@router.post("/{kb_id}/recompile-from-scratch", response_model=RecompileNowOut)
+async def recompile_knowledge_base_from_scratch(
+    kb_id: UUID,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    pool = request.app.state.pool
+    try:
+        kb = await require_kb_role(pool, str(kb_id), user_id, *ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    settings_row = await pool.fetchrow(
+        "SELECT compile_provider, compile_model, compile_max_sources, compile_prompt, "
+        "compile_max_tool_rounds, compile_max_tokens, provider_secret_encrypted "
+        "FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        kb_id,
+    )
+    if not settings_row or not settings_row["provider_secret_encrypted"]:
+        raise HTTPException(status_code=400, detail="Compile provider secret is not configured")
+
+    reset_source_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM documents WHERE knowledge_base_id = $1 AND NOT archived AND path NOT LIKE '/wiki/%%'",
+        kb_id,
+    )
+    conn = await pool.acquire()
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE documents SET archived = true, updated_at = now(), version = version + 1 "
+                "WHERE knowledge_base_id = $1 AND path LIKE '/wiki/%%' AND NOT archived",
+                kb_id,
+            )
+            await conn.execute("DELETE FROM wiki_path_aliases WHERE knowledge_base_id = $1", kb_id)
+            await conn.execute(
+                "DELETE FROM wiki_release_pages WHERE release_id IN (SELECT id FROM wiki_releases WHERE knowledge_base_id = $1)",
+                kb_id,
+            )
+            await conn.execute("DELETE FROM wiki_releases WHERE knowledge_base_id = $1", kb_id)
+            await conn.execute("DELETE FROM wiki_dirty_scope WHERE knowledge_base_id = $1", kb_id)
+            await conn.execute("DELETE FROM compiled_source_checkpoints WHERE knowledge_base_id = $1", kb_id)
+            await conn.execute(
+                "UPDATE knowledge_base_settings SET active_wiki_release_id = NULL, last_error = NULL, last_status = NULL, next_run_at = now(), updated_at = now() "
+                "WHERE knowledge_base_id = $1",
+                kb_id,
+            )
+    finally:
+        await pool.release(conn)
+
+    target = CompileTarget(
+        knowledge_base=kb["slug"],
+        provider_api_key=decrypt_secret(settings_row["provider_secret_encrypted"]) or "",
+        prompt=settings_row["compile_prompt"] or "",
+        max_sources=settings_row["compile_max_sources"] or default_max_sources(),
+        provider=settings_row["compile_provider"],
+        model=settings_row["compile_model"] or default_model_for_provider(settings_row["compile_provider"]),
+        max_tool_rounds=settings_row["compile_max_tool_rounds"] or default_max_tool_rounds(),
+        max_tokens=settings_row["compile_max_tokens"] or default_max_tokens(),
+        actor_user_id=kb["owner_user_id"],
+    )
+    try:
+        result = await run_target(pool, target)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {**result, "reset_source_count": int(reset_source_count or 0)}
 
 
 @router.post("/{kb_id}/streamline-now")

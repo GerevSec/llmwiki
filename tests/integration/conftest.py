@@ -26,6 +26,7 @@ async def pool():
         Path(__file__).parent.parent.parent / "supabase" / "migrations" / "005_compile_defaults_and_limits.sql",
         Path(__file__).parent.parent.parent / "supabase" / "migrations" / "006_wiki_direct_editing.sql",
         Path(__file__).parent.parent.parent / "supabase" / "migrations" / "007_wiki_streamlining.sql",
+        Path(__file__).parent.parent.parent / "supabase" / "migrations" / "008_compile_telemetry_and_recompile.sql",
     ]:
         await pool.execute(migration.read_text())
 

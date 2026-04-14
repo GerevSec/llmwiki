@@ -18,7 +18,7 @@ from services.compile_tools import (
 )
 from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
-from services.wiki_releases import create_draft_release, publish_release, record_dirty_scope
+from services.wiki_releases import create_draft_release, get_release_pages, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -53,6 +53,8 @@ class CompileTarget:
     interval_minutes: int | None = None
     wiki_release_id: str | None = None
     knowledge_base_id: str | None = None
+    run_id: str | None = None
+    run_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -176,12 +178,50 @@ def build_compile_prompt(knowledge_base: str, sources: list[PendingSource], extr
         "Internal guidance:",
         DEFAULT_COMPILE_INSTRUCTIONS.strip(),
         "",
+        "Structure guidance:",
+        "- Keep the wiki organized around durable subject-matter categories instead of ad-hoc one-off folders.",
+        "- Reuse existing category structure when it is coherent; improve it only when there is a clear structural gain.",
+        "- Prefer pages like concepts, architecture, flows, entities, operations, glossary, timelines, or other domain-appropriate groupings.",
+        "- Avoid creating file-as-folder nesting or one-entry wrapper directories.",
+        "- If a source belongs in an existing section, update that section rather than creating a parallel structure.",
+        "",
         "Changed sources:",
     ]
     for source in sources:
         lines.append(f"- `{source.full_path}` (version {source.version})")
     if extra_prompt:
         lines.extend(["", "Additional instructions:", extra_prompt])
+    return "\n".join(lines)
+
+
+async def build_compile_wiki_structure_guidance(conn: asyncpg.Connection, knowledge_base_id: str) -> str:
+    active_release_id = await conn.fetchval(
+        "SELECT active_wiki_release_id::text FROM knowledge_base_settings WHERE knowledge_base_id = $1::uuid",
+        knowledge_base_id,
+    )
+    if not active_release_id:
+        return ""
+
+    pages = await get_release_pages(conn, active_release_id)
+    if not pages:
+        return ""
+
+    top_level: dict[str, list[str]] = {}
+    for page in pages:
+        relative = page.full_path.replace("/wiki/", "", 1)
+        if not relative:
+            continue
+        parts = [part for part in relative.split("/") if part]
+        if not parts:
+            continue
+        category = "root" if len(parts) == 1 else parts[0]
+        top_level.setdefault(category, [])
+        top_level[category].append(parts[-1])
+
+    lines = ["Current wiki structure to preserve/reuse when sensible:"]
+    for category in sorted(top_level):
+        examples = ", ".join(sorted(dict.fromkeys(top_level[category]))[:4])
+        lines.append(f"- {category}: {examples}")
     return "\n".join(lines)
 
 
@@ -193,6 +233,57 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_ready(item) for item in value]
     return value
+
+
+def _new_compile_telemetry() -> dict[str, Any]:
+    return {
+        "provider_requests": 0,
+        "tool_rounds": 0,
+        "tool_calls": 0,
+        "tool_calls_by_name": {},
+        "continuations": 0,
+        "no_progress_rounds": 0,
+        "progress_events": 0,
+        "provider_request_ids": [],
+        "abort_reason": None,
+    }
+
+
+def _tool_result_made_progress(tool_name: str, result_text: str) -> bool:
+    if tool_name not in {"write", "delete"}:
+        return False
+    lowered = (result_text or "").strip().lower()
+    return bool(lowered) and not lowered.startswith("error:")
+
+
+async def _update_run_telemetry(
+    conn: asyncpg.Connection,
+    run_id: str,
+    telemetry: dict[str, Any],
+    *,
+    progress: bool = False,
+) -> None:
+    await conn.execute(
+        "UPDATE compile_runs SET telemetry = $1::jsonb, last_progress_at = CASE WHEN $2 THEN now() ELSE last_progress_at END WHERE id = $3::uuid",
+        json.dumps(_json_ready(telemetry)),
+        progress,
+        run_id,
+    )
+
+
+async def _cleanup_stale_compile_runs(conn: asyncpg.Connection, *, stale_after_seconds: int) -> int:
+    rows = await conn.fetch(
+        "SELECT id::text AS id FROM compile_runs WHERE status = 'running' AND started_at < now() - make_interval(secs => $1)",
+        stale_after_seconds,
+    )
+    if not rows:
+        return 0
+    await conn.execute(
+        "UPDATE compile_runs SET status = 'failed', error_message = COALESCE(error_message, $1), finished_at = COALESCE(finished_at, now()) WHERE id = ANY($2::uuid[])",
+        "Compile marked stale after exceeding the allowed run window without completing.",
+        [row["id"] for row in rows],
+    )
+    return len(rows)
 
 
 async def get_compile_context(
@@ -277,8 +368,21 @@ async def load_target_from_settings(pool_or_conn, knowledge_base_slug: str) -> C
             await release(conn)
 
 
+def _compile_abort_reason(target: CompileTarget, telemetry: dict[str, Any]) -> str | None:
+    if target.run_started_at:
+        elapsed = (datetime.now(UTC) - target.run_started_at).total_seconds()
+        if elapsed > settings.LLMWIKI_COMPILE_RUN_TIMEOUT_SECONDS:
+            telemetry["abort_reason"] = "run_timeout"
+            return "Compile aborted after exceeding total run timeout without completing"
+    if telemetry.get("no_progress_rounds", 0) >= settings.LLMWIKI_COMPILE_NO_PROGRESS_ROUNDS:
+        telemetry["abort_reason"] = "no_progress"
+        return "Compile aborted after repeated rounds without meaningful wiki progress"
+    return None
+
+
 async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_schedule: bool = False) -> dict[str, Any]:
     async with pool.acquire() as conn:
+        await _cleanup_stale_compile_runs(conn, stale_after_seconds=settings.LLMWIKI_COMPILE_STALE_AFTER_SECONDS)
         kb, _ = await get_compile_context(conn, target.knowledge_base, target.max_sources)
         acquired = await conn.fetchval(
             "SELECT pg_try_advisory_lock(hashtext($1))",
@@ -311,52 +415,58 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 provider=target.provider,
                 sources=[_serialize_pending_source(source) for source in pending],
             )
-            draft_release_id, _base_release_id = await create_draft_release(
-                conn,
-                kb["id"],
-                created_by="compile",
-                created_by_run_id=run_id,
-            )
-            prompt = build_compile_prompt(kb["slug"], pending, target.prompt)
             try:
+                draft_release_id, _base_release_id = await create_draft_release(
+                    conn,
+                    kb["id"],
+                    created_by="compile",
+                    created_by_run_id=run_id,
+                )
+                structure_guidance = await build_compile_wiki_structure_guidance(conn, kb["id"])
+                merged_prompt = "\n\n".join(part for part in [target.prompt.strip(), structure_guidance.strip()] if part)
+                prompt = build_compile_prompt(kb["slug"], pending, merged_prompt)
                 response = await _invoke_provider(
                     prompt,
                     replace(
                         target,
                         wiki_release_id=draft_release_id,
                         knowledge_base_id=kb["id"],
+                        run_id=run_id,
+                        run_started_at=datetime.now(UTC),
                     ),
                 )
+
+                quality_report = await publish_release(
+                    conn,
+                    kb["id"],
+                    draft_release_id,
+                    actor_user_id=target.actor_user_id,
+                    mode="compile",
+                )
+                await _mark_sources_compiled(conn, run_id, kb["id"], pending)
+                await _finish_run(conn, run_id, "succeeded", response_excerpt=response["text_excerpt"])
+                await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
+                for source in pending:
+                    await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")
+                return {
+                    "knowledge_base": kb["slug"],
+                    "status": "succeeded",
+                    "source_count": len(pending),
+                    "stop_reason": response["stop_reason"],
+                    "request_id": response["request_id"],
+                    "quality_report": quality_report,
+                }
             except Exception as exc:
                 await _finish_run(conn, run_id, "failed", error_message=str(exc))
                 await _update_kb_settings_run_state(conn, kb["id"], "failed", str(exc), advance_schedule, target.interval_minutes)
                 raise
-
-            quality_report = await publish_release(
-                conn,
-                kb["id"],
-                draft_release_id,
-                actor_user_id=target.actor_user_id,
-                mode="compile",
-            )
-            await _mark_sources_compiled(conn, run_id, kb["id"], pending)
-            await _finish_run(conn, run_id, "succeeded", response_excerpt=response["text_excerpt"])
-            await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
-            for source in pending:
-                await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")
-            return {
-                "knowledge_base": kb["slug"],
-                "status": "succeeded",
-                "source_count": len(pending),
-                "stop_reason": response["stop_reason"],
-                "request_id": response["request_id"],
-                "quality_report": quality_report,
-            }
         finally:
             await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", f"compile:{kb['id']}")
 
 
 async def run_due_schedules(pool: asyncpg.Pool, *, concurrency: int = 3) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        await _cleanup_stale_compile_runs(conn, stale_after_seconds=settings.LLMWIKI_COMPILE_STALE_AFTER_SECONDS)
     rows = await pool.fetch(
         "SELECT kb.slug "
         "FROM knowledge_base_settings s "
@@ -395,8 +505,16 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
     tools = tool_definitions_anthropic()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
+    telemetry = _new_compile_telemetry()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
+            abort_reason = _compile_abort_reason(target, telemetry)
+            if abort_reason:
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
+                raise RuntimeError(abort_reason)
             response = await client.post(
                 ANTHROPIC_API_URL,
                 headers=headers,
@@ -409,19 +527,32 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
             )
             response.raise_for_status()
             data = response.json()
+            telemetry["provider_requests"] += 1
+            if data.get("id"):
+                telemetry["provider_request_ids"].append(data["id"])
             stop_reason = data.get("stop_reason")
             content_blocks = data.get("content", [])
             if stop_reason == "pause_turn":
+                telemetry["continuations"] += 1
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 messages.append({"role": "assistant", "content": content_blocks})
                 continue
             if stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": content_blocks})
                 tool_results = []
+                telemetry["tool_rounds"] += 1
+                progress_made = False
                 tool_pool = await _get_pool_for_tools()
                 async with tool_pool.acquire() as tool_conn:
                     for block in content_blocks:
                         if block.get("type") != "tool_use":
                             continue
+                        tool_name = block["name"]
+                        telemetry["tool_calls"] += 1
+                        telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -429,9 +560,11 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                                 knowledge_base_slug=target.knowledge_base,
                                 wiki_release_id=target.wiki_release_id,
                             ),
-                            block["name"],
+                            tool_name,
                             block.get("input"),
                         )
+                        if _tool_result_made_progress(tool_name, result_text):
+                            progress_made = True
                         tool_results.append(
                             {
                                 "type": "tool_result",
@@ -439,11 +572,25 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                                 "content": result_text,
                             }
                         )
+                telemetry["progress_events"] += 1 if progress_made else 0
+                telemetry["no_progress_rounds"] = 0 if progress_made else telemetry["no_progress_rounds"] + 1
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry, progress=progress_made)
                 messages.append({"role": "user", "content": tool_results})
                 continue
             if stop_reason not in ANTHROPIC_SUCCESS_STOP_REASONS:
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 raise RuntimeError(f"Anthropic compile did not complete successfully (stop_reason={stop_reason})")
             text_excerpt = "\n".join(block.get("text", "") for block in content_blocks if block.get("type") == "text")[:2000]
+            if target.run_id:
+                tool_pool = await _get_pool_for_tools()
+                async with tool_pool.acquire() as telemetry_conn:
+                    await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
             return {"stop_reason": stop_reason or "unknown", "request_id": data.get("id", ""), "text_excerpt": text_excerpt}
     raise RuntimeError("Anthropic compile exceeded tool round limit")
 
@@ -458,8 +605,16 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
     tools = tool_definitions_openrouter()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
+    telemetry = _new_compile_telemetry()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
+            abort_reason = _compile_abort_reason(target, telemetry)
+            if abort_reason:
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
+                raise RuntimeError(abort_reason)
             response = await client.post(
                 OPENROUTER_API_URL,
                 headers=headers,
@@ -473,6 +628,9 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
             )
             response.raise_for_status()
             data = response.json()
+            telemetry["provider_requests"] += 1
+            if data.get("id"):
+                telemetry["provider_request_ids"].append(data["id"])
             choice = data["choices"][0]
             message = choice.get("message", {})
             tool_calls = message.get("tool_calls") or []
@@ -485,9 +643,14 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                         "tool_calls": tool_calls,
                     }
                 )
+                telemetry["tool_rounds"] += 1
+                progress_made = False
                 tool_pool = await _get_pool_for_tools()
                 async with tool_pool.acquire() as tool_conn:
                     for tool_call in tool_calls:
+                        tool_name = tool_call["function"]["name"]
+                        telemetry["tool_calls"] += 1
+                        telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -495,20 +658,36 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                                 knowledge_base_slug=target.knowledge_base,
                                 wiki_release_id=target.wiki_release_id,
                             ),
-                            tool_call["function"]["name"],
+                            tool_name,
                             loads_lenient_json(tool_call["function"]["arguments"] or "{}"),
                         )
+                        if _tool_result_made_progress(tool_name, result_text):
+                            progress_made = True
                         messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tool_call["id"],
-                                "name": tool_call["function"]["name"],
+                                "name": tool_name,
                                 "content": result_text,
                             }
                         )
+                telemetry["progress_events"] += 1 if progress_made else 0
+                telemetry["no_progress_rounds"] = 0 if progress_made else telemetry["no_progress_rounds"] + 1
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry, progress=progress_made)
                 continue
             if finish_reason not in OPENROUTER_SUCCESS_FINISH_REASONS:
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 raise RuntimeError(f"OpenRouter compile did not complete successfully (finish_reason={finish_reason})")
+            if target.run_id:
+                tool_pool = await _get_pool_for_tools()
+                async with tool_pool.acquire() as telemetry_conn:
+                    await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
             return {
                 "stop_reason": finish_reason or "unknown",
                 "request_id": data.get("id", ""),
@@ -540,8 +719,8 @@ async def _record_run(
 ) -> str:
     row = await conn.fetchrow(
         "INSERT INTO compile_runs "
-        "(knowledge_base_id, user_id, status, model, provider, source_count, source_snapshot, response_excerpt, started_at, finished_at) "
-        "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8, now(), CASE WHEN $3 = 'running' THEN NULL ELSE now() END) "
+        "(knowledge_base_id, user_id, status, model, provider, source_count, source_snapshot, response_excerpt, telemetry, last_progress_at, started_at, finished_at) "
+        "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, CASE WHEN $3 = 'running' THEN now() ELSE NULL END, now(), CASE WHEN $3 = 'running' THEN NULL ELSE now() END) "
         "RETURNING id::text AS id",
         knowledge_base_id,
         user_id,
@@ -551,6 +730,7 @@ async def _record_run(
         len(sources),
         json.dumps(_json_ready(sources)),
         response_excerpt,
+        json.dumps(_new_compile_telemetry()),
     )
     return row["id"]
 

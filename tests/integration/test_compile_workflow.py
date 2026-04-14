@@ -151,3 +151,83 @@ async def test_enabling_schedule_requires_secret_when_missing(client, pool):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Provider secret is required before enabling periodic compile"
+
+
+@pytest.mark.asyncio
+async def test_compile_due_marks_stale_running_runs_failed(client, pool, monkeypatch):
+    await pool.execute(
+        "INSERT INTO compile_runs (knowledge_base_id, user_id, status, model, provider, source_count, source_snapshot, started_at, telemetry) "
+        "VALUES ($1, $2, 'running', 'stale-model', 'openrouter', 0, '[]'::jsonb, now() - interval '2 hours', '{}'::jsonb)",
+        KB_A_ID,
+        USER_A_ID,
+    )
+
+    async def fake_invoke(prompt, target):
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-stale",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Updated wiki",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    response = await client.post(
+        "/internal/compile-due",
+        headers={"x-llmwiki-automation-secret": "test-automation-secret"},
+    )
+
+    assert response.status_code == 200
+    stale = await pool.fetchrow(
+        "SELECT status, error_message, finished_at FROM compile_runs WHERE model = 'stale-model' ORDER BY started_at DESC LIMIT 1"
+    )
+    assert stale["status"] == "failed"
+    assert "marked stale" in stale["error_message"].lower()
+    assert stale["finished_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_recompile_from_scratch_resets_checkpoints_and_rebuilds_wiki(client, pool, monkeypatch):
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+        "VALUES ('bbbbbbbb-1111-1111-1111-111111111111', $1, $2, 'overview.md', 'Overview', '/wiki/', 'md', 'ready', '# Old wiki', 1)",
+        KB_A_ID,
+        USER_A_ID,
+    )
+    await pool.execute(
+        "INSERT INTO compiled_source_checkpoints (knowledge_base_id, document_id, compiled_version) VALUES ($1, 'aaaaaaaa-1111-1111-1111-111111111111', 1)",
+        KB_A_ID,
+    )
+
+    async def fake_invoke(prompt, target):
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-reset",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Rebuilt wiki",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/recompile-from-scratch",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert response.json()["reset_source_count"] == 1
+
+    checkpoint_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM compiled_source_checkpoints WHERE knowledge_base_id = $1",
+        KB_A_ID,
+    )
+    active_release = await pool.fetchval(
+        "SELECT active_wiki_release_id FROM knowledge_base_settings WHERE knowledge_base_id = $1",
+        KB_A_ID,
+    )
+    active_release_pages = await pool.fetchval(
+        "SELECT COUNT(*) FROM wiki_release_pages WHERE release_id = $1",
+        active_release,
+    )
+    assert checkpoint_count == 1
+    assert active_release is not None
+    assert active_release_pages >= 0

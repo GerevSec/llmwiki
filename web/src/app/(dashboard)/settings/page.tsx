@@ -156,11 +156,13 @@ function ScheduleCard({
   members,
   saving,
   running,
+  rebuilding,
   runningStreamlining,
   deleting,
   onScheduleChange,
   onSaveSchedule,
   onCompileNow,
+  onRecompileFromScratch,
   onStreamlineNow,
   onCreateInvite,
   onUpdateMember,
@@ -174,11 +176,13 @@ function ScheduleCard({
   members: Member[]
   saving: boolean
   running: boolean
+  rebuilding: boolean
   runningStreamlining: boolean
   deleting: boolean
   onScheduleChange: (kbId: string, patch: Partial<CompileSchedule>) => void
   onSaveSchedule: (kbId: string) => void
   onCompileNow: (kbId: string, kbName: string) => void
+  onRecompileFromScratch: (kbId: string, kbName: string) => void
   onStreamlineNow: (kbId: string, kbName: string) => void
   onCreateInvite: (kbId: string, email: string, role: string) => void
   onUpdateMember: (kbId: string, memberId: string, role: string) => void
@@ -230,6 +234,14 @@ function ScheduleCard({
                 )}
               </HoverCardContent>
             </HoverCard>
+            <button
+              onClick={() => onRecompileFromScratch(kb.id, kb.name)}
+              disabled={rebuilding}
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50 cursor-pointer"
+            >
+              {rebuilding ? <Loader2 className="size-4 animate-spin" /> : null}
+              {rebuilding ? 'Rebuilding…' : 'Recompile from scratch'}
+            </button>
             <button
               onClick={() => onStreamlineNow(kb.id, kb.name)}
               disabled={runningStreamlining}
@@ -566,6 +578,7 @@ export default function SettingsPage() {
   const [usage, setUsage] = React.useState<Usage | null>(null)
   const [configCopied, setConfigCopied] = React.useState(false)
   const [runningKbId, setRunningKbId] = React.useState<string | null>(null)
+  const [rebuildingKbId, setRebuildingKbId] = React.useState<string | null>(null)
   const [runningStreamliningKbId, setRunningStreamliningKbId] = React.useState<string | null>(null)
   const [savingScheduleKbId, setSavingScheduleKbId] = React.useState<string | null>(null)
   const [deletingKbId, setDeletingKbId] = React.useState<string | null>(null)
@@ -685,6 +698,29 @@ export default function SettingsPage() {
       toast.error((err as Error).message || 'Streamlining failed')
     } finally {
       setRunningStreamliningKbId(null)
+    }
+  }
+
+  const handleRecompileFromScratch = async (kbId: string, kbName: string) => {
+    if (!token) return
+    setRebuildingKbId(kbId)
+    try {
+      const result = await apiFetch<{ status: string; source_count: number; reset_source_count: number }>(
+        `/v1/knowledge-bases/${kbId}/recompile-from-scratch`,
+        token,
+        { method: 'POST' },
+      )
+      toast.success(
+        result.status === 'succeeded'
+          ? `Recompiled ${result.source_count} source${result.source_count === 1 ? '' : 's'} from scratch for ${kbName}`
+          : `Recompile reset ${result.reset_source_count} source${result.reset_source_count === 1 ? '' : 's'} for ${kbName}`,
+      )
+      const kb = knowledgeBases.find((item) => item.id === kbId)
+      if (kb) await refreshKbAdminData(kb)
+    } catch (err) {
+      toast.error((err as Error).message || 'Recompile from scratch failed')
+    } finally {
+      setRebuildingKbId(null)
     }
   }
 
@@ -853,11 +889,13 @@ export default function SettingsPage() {
               members={membersByKb[kb.id] || []}
               saving={savingScheduleKbId === kb.id}
               running={runningKbId === kb.id}
+              rebuilding={rebuildingKbId === kb.id}
               runningStreamlining={runningStreamliningKbId === kb.id}
               deleting={deletingKbId === kb.id}
               onScheduleChange={onScheduleChange}
               onSaveSchedule={handleSaveSchedule}
               onCompileNow={handleCompileNow}
+              onRecompileFromScratch={handleRecompileFromScratch}
               onStreamlineNow={handleStreamlineNow}
               onCreateInvite={handleCreateInvite}
               onUpdateMember={handleUpdateMember}
