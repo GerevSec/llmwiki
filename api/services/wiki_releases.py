@@ -23,6 +23,16 @@ RETENTION_DAYS = 7
 _WIKI_MARKDOWN_TYPES = {"md", "txt", "note"}
 _WIKI_PROTECTED = {("/wiki/", "overview.md"), ("/wiki/", "log.md")}
 _INTERNAL_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+_MARKDOWN_LINK_OPEN_RE = re.compile(r"!\[[^\]]*\]\(|\[[^\]]*\]\(")
+_PATH_SUFFIX_RE = re.compile(r"^([^?#]*)(\?[^#]*)?(#.*)?$")
+_EXTERNAL_PREFIXES = (
+    "http://",
+    "https://",
+    "mailto:",
+    "tel:",
+    "data:",
+    "javascript:",
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,222 @@ def _coverage_units(text: str) -> set[str]:
 def _duplicate_signature(page: ReleasePage) -> str:
     content = _normalize_coverage_unit(page.content)
     return f"{_normalize_coverage_unit(page.title or page.filename)}::{content[:600]}"
+
+
+def _page_slug(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+
+
+def _parse_destination(raw_destination: str) -> tuple[str, str, bool] | None:
+    destination = raw_destination.strip()
+    if not destination:
+        return None
+
+    if destination.startswith("<"):
+        end = destination.find(">")
+        if end == -1:
+            return None
+        return destination[1:end], destination[end + 1 :], True
+
+    parts = destination.split(maxsplit=1)
+    if len(parts) == 1:
+        return parts[0], "", False
+    return parts[0], f" {parts[1]}", False
+
+
+def _should_skip_href(href: str) -> bool:
+    lowered = href.lower()
+    return not href or href.startswith("#") or href.startswith("//") or lowered.startswith(_EXTERNAL_PREFIXES)
+
+
+def _split_path_suffix(href: str) -> tuple[str, str]:
+    match = _PATH_SUFFIX_RE.match(href)
+    if not match:
+        return href, ""
+    return match.group(1), f"{match.group(2) or ''}{match.group(3) or ''}"
+
+
+def _resolve_href(current_dir: str, href: str) -> str:
+    path_part, _suffix = _split_path_suffix(href)
+    if path_part.startswith("/"):
+        resolved = posixpath.normpath(path_part)
+    else:
+        resolved = posixpath.normpath(posixpath.join(current_dir, path_part))
+    return resolved if resolved.startswith("/") else f"/{resolved}"
+
+
+def _make_relative_href(current_dir: str, target_location: str, original_href: str) -> str:
+    relative = posixpath.relpath(target_location, start=current_dir or "/")
+    if relative == ".":
+        relative = posixpath.basename(target_location)
+    if original_href.startswith("./") and not relative.startswith("."):
+        return f"./{relative}"
+    return relative
+
+
+def _find_destination_bounds(content: str, start: int) -> tuple[int, int] | None:
+    depth = 1
+    in_angle = False
+    escape = False
+    idx = start
+
+    while idx < len(content):
+        char = content[idx]
+        if escape:
+            escape = False
+            idx += 1
+            continue
+
+        if char == "\\":
+            escape = True
+            idx += 1
+            continue
+
+        if char == "<" and not in_angle:
+            in_angle = True
+        elif char == ">" and in_angle:
+            in_angle = False
+        elif not in_angle:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return start, idx
+
+        idx += 1
+
+    return None
+
+
+def _rewrite_markdown_destinations(content: str, rewriter) -> str:
+    parts: list[str] = []
+    cursor = 0
+
+    for match in _MARKDOWN_LINK_OPEN_RE.finditer(content):
+        destination_bounds = _find_destination_bounds(content, match.end())
+        if destination_bounds is None:
+            continue
+
+        start, end = destination_bounds
+        raw_destination = content[start:end]
+        replacement = rewriter(raw_destination.strip())
+        if replacement is None or replacement == raw_destination.strip():
+            continue
+
+        parts.append(content[cursor:start])
+        parts.append(replacement)
+        cursor = end
+
+    if not parts:
+        return content
+
+    parts.append(content[cursor:])
+    return "".join(parts)
+
+
+def _resolve_release_reference(current_page: ReleasePage, href: str) -> str | None:
+    href = href.strip()
+    if not href or _should_skip_href(href):
+        return None
+    path_part, _suffix = _split_path_suffix(href)
+    if not path_part:
+        return current_page.full_path
+    if path_part.startswith("/"):
+        return _resolve_href("/", path_part)
+    return _resolve_href(posixpath.dirname(current_page.full_path), path_part)
+
+
+def _find_best_release_target(current_page: ReleasePage, href: str, pages: list[ReleasePage], alias_paths: set[str]) -> ReleasePage | None:
+    resolved = _resolve_release_reference(current_page, href)
+    if not resolved:
+        return None
+
+    full_paths = {page.full_path: page for page in pages}
+    if resolved in full_paths:
+        return full_paths[resolved]
+
+    normalized = resolved.rstrip("/")
+    if normalized != resolved and normalized in full_paths:
+        return full_paths[normalized]
+
+    if "." not in normalized.rsplit("/", 1)[-1]:
+        for suffix in (".md", ".txt"):
+            candidate = f"{normalized}{suffix}"
+            if candidate in full_paths:
+                return full_paths[candidate]
+
+    ref_slug = _page_slug(normalized.rsplit("/", 1)[-1].removesuffix(".md").removesuffix(".txt"))
+    ref_tail = normalized.rsplit("/", 1)[-1]
+    candidates: list[tuple[int, int, ReleasePage]] = []
+    path_prefix = normalized + "/"
+    for page in pages:
+        score = 0
+        page_full_path = page.full_path.rstrip("/")
+        if page_full_path.startswith(path_prefix):
+            score = max(score, 100)
+        if page.filename in {ref_tail, f"{ref_slug}.md", f"{ref_slug}.txt"}:
+            score = max(score, 90)
+        if _page_slug(page.title) == ref_slug:
+            score = max(score, 80)
+        if _page_slug(page_full_path.rsplit("/", 1)[-1].removesuffix(".md").removesuffix(".txt")) == ref_slug:
+            score = max(score, 70)
+        if score:
+            candidates.append((score, len(page_full_path), page))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    best_score = candidates[0][0]
+    best_candidates = [item[2] for item in candidates if item[0] == best_score]
+    return best_candidates[0] if len(best_candidates) == 1 else None
+
+
+async def repair_release_internal_links(conn: asyncpg.Connection, knowledge_base_id: str, release_id: str) -> None:
+    pages = await get_release_pages(conn, release_id)
+    alias_rows = await conn.fetch(
+        "SELECT regexp_replace(alias_path || alias_filename, '/+', '/', 'g') AS full_path FROM wiki_path_aliases WHERE release_id = $1::uuid AND knowledge_base_id = $2::uuid AND (expires_at IS NULL OR expires_at > now())",
+        release_id,
+        knowledge_base_id,
+    )
+    alias_paths = {row["full_path"] for row in alias_rows}
+
+    for page in pages:
+        def rewrite(destination: str) -> str | None:
+            parsed = _parse_destination(destination)
+            if parsed is None:
+                return None
+            raw_target, trailing, wrapped = parsed
+            href_path, href_suffix = _split_path_suffix(raw_target)
+            if _should_skip_href(href_path):
+                return None
+
+            resolved = _resolve_release_reference(page, raw_target)
+            if resolved and (resolved in {item.full_path for item in pages} or resolved in alias_paths):
+                return None
+
+            target_page = _find_best_release_target(page, raw_target, pages, alias_paths)
+            if not target_page:
+                return None
+
+            rewritten = _make_relative_href(posixpath.dirname(page.full_path), target_page.full_path, href_path)
+            if wrapped:
+                rewritten = f"<{rewritten}>"
+            return rewritten + href_suffix + trailing
+
+        rewritten_content = _rewrite_markdown_destinations(page.content, rewrite)
+        if rewritten_content != page.content:
+            await upsert_release_page(
+                conn,
+                release_id,
+                path=page.path,
+                filename=page.filename,
+                title=page.title,
+                content=rewritten_content,
+                tags=page.tags,
+                sort_order=page.sort_order,
+                page_key=page.page_key,
+            )
 
 
 async def ensure_initial_wiki_release(
@@ -652,6 +878,7 @@ async def publish_release(
         if base_release_id and active_release_id and base_release_id != active_release_id:
             raise RuntimeError("Draft release is stale relative to the current published wiki")
 
+        await repair_release_internal_links(conn, knowledge_base_id, release_id)
         validation = await validate_release(conn, knowledge_base_id, release_id, mode=mode)
         if not validation.ok:
             raise RuntimeError("; ".join(validation.errors))

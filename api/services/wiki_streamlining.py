@@ -64,6 +64,8 @@ You are streamlining an existing wiki. Preserve all source-grounded information 
 Rules:
 - Do not drop facts.
 - Prefer stable structure unless there is a clear coherence improvement.
+- Prefer simple operations in this order: update existing canonical pages, create missing pages, merge duplicates.
+- Avoid rename/move/split unless simpler update/create/merge steps cannot produce a coherent result.
 - Merge duplicated pages when one canonical page can own the information.
 - Renames and moves should reduce confusion, not create churn.
 - If splitting a page, keep the original page as a lightweight index/landing page.

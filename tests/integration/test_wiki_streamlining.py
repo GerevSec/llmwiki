@@ -1,6 +1,6 @@
 import pytest
 
-from services.wiki_releases import ensure_initial_wiki_release
+from services.wiki_releases import create_draft_release, ensure_initial_wiki_release, publish_release, upsert_release_page
 from services.encryption import encrypt_secret
 from tests.helpers.jwt import auth_headers
 from tests.integration.isolation.conftest import KB_A_ID, USER_A_ID
@@ -262,3 +262,40 @@ async def test_streamline_now_resolves_fuzzy_merge_paths(client, pool, monkeypat
     merged_source = await pool.fetchrow("SELECT archived FROM documents WHERE id = $1", weird_source_id)
     assert "Unique source fact." in merged_target["content"]
     assert merged_source["archived"] is True
+
+
+@pytest.mark.asyncio
+async def test_publish_release_repairs_resolvable_internal_links(pool):
+    conn = await pool.acquire()
+    try:
+        async with conn.transaction():
+            active_release_id = await ensure_initial_wiki_release(conn, KB_A_ID)
+            draft_release_id, _ = await create_draft_release(conn, KB_A_ID, created_by="test")
+            await upsert_release_page(
+                conn,
+                draft_release_id,
+                path="/wiki/entities/",
+                filename="team.md",
+                title="Team",
+                content="# Team\n\nSee [Product Strategy](../concepts/product-strategy.md).",
+                tags=["team"],
+                page_key="77777777-1111-1111-1111-111111111111",
+            )
+            await upsert_release_page(
+                conn,
+                draft_release_id,
+                path="/wiki/concepts/product-strategy.md/",
+                filename="product-strategy--mvp-debate.md",
+                title="Product Strategy",
+                content="# Product Strategy\n\nCanonical page.",
+                tags=["strategy"],
+                page_key="88888888-1111-1111-1111-111111111111",
+            )
+            await publish_release(conn, KB_A_ID, draft_release_id, actor_user_id=USER_A_ID, mode="streamlining")
+        repaired = await pool.fetchval(
+            "SELECT content FROM documents WHERE id = '77777777-1111-1111-1111-111111111111'::uuid",
+        )
+    finally:
+        await pool.release(conn)
+
+    assert "../concepts/product-strategy.md/product-strategy--mvp-debate.md" in repaired
