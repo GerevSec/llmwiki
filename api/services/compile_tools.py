@@ -18,6 +18,7 @@ from services.wiki_releases import (
 MAX_LIST = 50
 MAX_SEARCH = 20
 MAX_BATCH_CHARS = 120_000
+MAX_SINGLE_READ_CHARS = 20_000
 PROTECTED_FILES = {("/wiki/", "overview.md"), ("/wiki/", "log.md")}
 
 
@@ -284,6 +285,12 @@ async def tool_read(
     content = doc["content"] or ""
     if sections:
         content = _extract_sections(content, sections)
+    elif not dir_path.startswith("/wiki/") and len(content) > MAX_SINGLE_READ_CHARS:
+        remaining = len(content) - MAX_SINGLE_READ_CHARS
+        content = (
+            content[:MAX_SINGLE_READ_CHARS]
+            + f"\n\n[Truncated source read: {remaining} additional characters omitted. Use search for targeted follow-up if needed.]"
+        )
     return f"{doc['path']}{doc['filename']}\n\n{content}"
 
 

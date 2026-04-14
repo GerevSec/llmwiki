@@ -81,6 +81,7 @@ class PendingSource:
     filename: str
     title: str
     version: int
+    content_chars: int
     updated_at: datetime | None
 
     @property
@@ -124,6 +125,7 @@ def _serialize_pending_source(source: PendingSource) -> dict[str, Any]:
         "filename": source.filename,
         "title": source.title,
         "version": source.version,
+        "content_chars": source.content_chars,
         "updated_at": source.updated_at.isoformat() if source.updated_at else None,
         "full_path": source.full_path,
     }
@@ -144,7 +146,8 @@ def _build_recompile_batch_instructions(batch_index: int, total_batches: int) ->
     return (
         f"This is batch {batch_index} of {total_batches} in a from-scratch rebuild. "
         "Continue updating the same draft wiki with only the listed sources for this batch. "
-        "Preserve draft wiki pages created earlier in this rebuild, and do not restart from zero."
+        "Preserve draft wiki pages created earlier in this rebuild, and do not restart from zero. "
+        "Before you finish this batch, make concrete wiki edits for the facts you extracted: update/create the relevant pages, refresh overview, and add the batch's ingest note."
     )
 
 
@@ -168,6 +171,8 @@ def filter_pending_sources(
             continue
         if row.get("status") != "ready":
             continue
+        if int(row.get("content_chars") or 0) <= 0:
+            continue
         if checkpoint_versions.get(row["id"]) == row["version"]:
             continue
         pending.append(
@@ -177,6 +182,7 @@ def filter_pending_sources(
                 filename=row["filename"],
                 title=row.get("title") or row["filename"],
                 version=row["version"],
+                content_chars=int(row.get("content_chars") or 0),
                 updated_at=row.get("updated_at"),
             )
         )
@@ -416,6 +422,7 @@ async def get_compile_context(
             dict(row)
             for row in await conn.fetch(
                 "SELECT id::text AS id, path, filename, COALESCE(title, filename) AS title, status, archived, version, updated_at "
+                ", length(coalesce(content, '')) AS content_chars "
                 "FROM documents WHERE knowledge_base_id = $1::uuid",
                 kb["id"],
             )

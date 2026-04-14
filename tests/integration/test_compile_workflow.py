@@ -117,6 +117,36 @@ async def test_compile_now_uses_kb_settings(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_compile_ignores_empty_ready_sources(client, pool, monkeypatch):
+    await pool.execute(
+        "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+        "VALUES ('bbbbbbbb-aaaa-1111-1111-111111111111', $1, $2, 'empty.md', 'Empty', '/', 'md', 'ready', '', 1)",
+        KB_A_ID,
+        USER_A_ID,
+    )
+
+    captured = {}
+
+    async def fake_invoke(prompt, target):
+        captured["pending_source_paths"] = target.pending_source_paths
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-nonempty-only",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Updated wiki",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/compile-now",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    assert captured["pending_source_paths"] == ("/source.md",)
+
+
+@pytest.mark.asyncio
 async def test_compile_schedule_defaults_are_high_enough(client):
     response = await client.get(
         f"/v1/knowledge-bases/{KB_A_ID}/compile-schedule",

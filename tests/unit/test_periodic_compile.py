@@ -27,6 +27,7 @@ from services.periodic_compile import (  # noqa: E402
     run_target,
 )
 from services.openrouter_client import post_openrouter_chat_completion  # noqa: E402
+from services.compile_tools import ToolContext, tool_read  # noqa: E402
 from services.wiki_streamlining import _extract_json_payload  # noqa: E402
 from api_key_auth import hash_api_key  # noqa: E402
 
@@ -43,6 +44,7 @@ class TestPeriodicCompileHelpers:
                 "status": "ready",
                 "archived": False,
                 "version": 2,
+                "content_chars": 100,
                 "updated_at": now,
             },
             {
@@ -53,6 +55,7 @@ class TestPeriodicCompileHelpers:
                 "status": "ready",
                 "archived": False,
                 "version": 5,
+                "content_chars": 100,
                 "updated_at": now,
             },
             {
@@ -63,6 +66,7 @@ class TestPeriodicCompileHelpers:
                 "status": "processing",
                 "archived": False,
                 "version": 1,
+                "content_chars": 100,
                 "updated_at": now - timedelta(minutes=1),
             },
             {
@@ -73,7 +77,19 @@ class TestPeriodicCompileHelpers:
                 "status": "ready",
                 "archived": False,
                 "version": 7,
+                "content_chars": 100,
                 "updated_at": now - timedelta(minutes=2),
+            },
+            {
+                "id": "5",
+                "path": "/",
+                "filename": "empty.pdf",
+                "title": "Empty",
+                "status": "ready",
+                "archived": False,
+                "version": 1,
+                "content_chars": 0,
+                "updated_at": now - timedelta(minutes=3),
             },
         ]
 
@@ -92,6 +108,7 @@ class TestPeriodicCompileHelpers:
                 "status": "ready",
                 "archived": False,
                 "version": 1,
+                "content_chars": 10,
                 "updated_at": now,
             },
             {
@@ -102,6 +119,7 @@ class TestPeriodicCompileHelpers:
                 "status": "ready",
                 "archived": False,
                 "version": 1,
+                "content_chars": 10,
                 "updated_at": now - timedelta(hours=1),
             },
         ]
@@ -118,6 +136,7 @@ class TestPeriodicCompileHelpers:
                 filename="paper.pdf",
                 title="Paper",
                 version=3,
+                content_chars=100,
                 updated_at=None,
             )
         ]
@@ -465,6 +484,34 @@ async def test_invoke_openrouter_accepts_missing_finish_reason_when_message_has_
     assert result["request_id"] == "or_1"
     assert result["stop_reason"] == "unknown"
     assert "AUTOMATION SUMMARY" in result["text_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_tool_read_truncates_large_non_wiki_documents(monkeypatch):
+    huge_content = "A" * 25_000
+
+    class FakePool:
+        async def fetchrow(self, sql, *args):
+            return {
+                "id": "doc-1",
+                "filename": "big.txt",
+                "title": "Big",
+                "path": "/docs/",
+                "content": huge_content,
+                "file_type": "txt",
+                "page_count": None,
+            }
+
+    async def fake_resolve_kb(context, roles=("owner", "admin", "editor", "viewer")):
+        return {"id": "kb-1"}
+
+    monkeypatch.setattr("services.compile_tools._resolve_kb", fake_resolve_kb)
+
+    result = await tool_read(ToolContext(pool=FakePool(), user_id="user-1", knowledge_base_slug="kb"), path="/docs/big.txt")
+
+    assert result.startswith("/docs/big.txt\n\n")
+    assert "[Truncated source read:" in result
+    assert len(result) < 21_000
 
 
 @pytest.mark.asyncio
