@@ -12,9 +12,12 @@ sys.path.append(str(ROOT / "mcp"))
 from services.periodic_compile import (  # noqa: E402
     CompileTarget,
     PendingSource,
+    _compile_abort_reason,
     _compile_tool_made_meaningful_progress,
     _invoke_anthropic,
     _invoke_openrouter,
+    _mark_progress_event,
+    _new_compile_telemetry,
     build_compile_prompt,
     filter_pending_sources,
     run_target,
@@ -144,6 +147,65 @@ class TestPeriodicCompileHelpers:
         assert _compile_tool_made_meaningful_progress(target, "read", {"path": "/docs/source.md"}, "Read ok", seen) is False
         assert _compile_tool_made_meaningful_progress(target, "search", {"query": "x"}, "Found stuff", seen) is False
         assert _compile_tool_made_meaningful_progress(target, "write", {"path": "/wiki/a.md"}, "Updated `/wiki/a.md`", seen) is True
+
+    def test_no_progress_abort_respects_grace_period(self):
+        telemetry = _new_compile_telemetry()
+        telemetry["no_progress_rounds"] = 8
+        target = CompileTarget(
+            "kb",
+            "key",
+            "",
+            10,
+            "openrouter",
+            "model",
+            10,
+            1024,
+            "user-1",
+            run_started_at=datetime.now(UTC) - timedelta(seconds=30),
+        )
+
+        assert _compile_abort_reason(target, telemetry) is None
+        assert telemetry["abort_reason"] is None
+
+    def test_no_progress_abort_triggers_after_grace_expires(self):
+        telemetry = _new_compile_telemetry()
+        telemetry["no_progress_rounds"] = 8
+        target = CompileTarget(
+            "kb",
+            "key",
+            "",
+            10,
+            "openrouter",
+            "model",
+            10,
+            1024,
+            "user-1",
+            run_started_at=datetime.now(UTC) - timedelta(minutes=6),
+        )
+
+        assert _compile_abort_reason(target, telemetry) == "Compile aborted after repeated rounds without meaningful wiki progress"
+        assert telemetry["abort_reason"] == "no_progress"
+
+    def test_progress_event_resets_grace_anchor(self):
+        telemetry = _new_compile_telemetry()
+        telemetry["no_progress_rounds"] = 7
+        _mark_progress_event(telemetry, progress_made=True)
+        telemetry["no_progress_rounds"] = 8
+        target = CompileTarget(
+            "kb",
+            "key",
+            "",
+            10,
+            "openrouter",
+            "model",
+            10,
+            1024,
+            "user-1",
+            run_started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+
+        assert _compile_abort_reason(target, telemetry) is None
+        assert telemetry["last_meaningful_progress_at"] is not None
 
 
 @pytest.mark.asyncio

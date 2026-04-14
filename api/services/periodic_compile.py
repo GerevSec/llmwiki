@@ -251,6 +251,7 @@ def _new_compile_telemetry() -> dict[str, Any]:
         "progress_events": 0,
         "provider_request_ids": [],
         "abort_reason": None,
+        "last_meaningful_progress_at": None,
     }
 
 
@@ -297,6 +298,13 @@ def _compile_tool_made_meaningful_progress(
         seen_source_reads.add(normalized_path)
         return True
     return False
+
+
+def _mark_progress_event(telemetry: dict[str, Any], *, progress_made: bool) -> None:
+    telemetry["progress_events"] += 1 if progress_made else 0
+    telemetry["no_progress_rounds"] = 0 if progress_made else telemetry["no_progress_rounds"] + 1
+    if progress_made:
+        telemetry["last_meaningful_progress_at"] = datetime.now(UTC).isoformat()
 
 
 async def _update_run_telemetry(
@@ -421,6 +429,17 @@ def _compile_abort_reason(target: CompileTarget, telemetry: dict[str, Any]) -> s
             telemetry["abort_reason"] = "run_timeout"
             return "Compile aborted after exceeding total run timeout without completing"
     if telemetry.get("no_progress_rounds", 0) >= settings.LLMWIKI_COMPILE_NO_PROGRESS_ROUNDS:
+        grace_anchor = target.run_started_at
+        last_progress_at = telemetry.get("last_meaningful_progress_at")
+        if isinstance(last_progress_at, str):
+            try:
+                grace_anchor = datetime.fromisoformat(last_progress_at)
+            except ValueError:
+                grace_anchor = target.run_started_at
+        if grace_anchor:
+            grace_elapsed = (datetime.now(UTC) - grace_anchor).total_seconds()
+            if grace_elapsed < settings.LLMWIKI_COMPILE_NO_PROGRESS_GRACE_SECONDS:
+                return None
         telemetry["abort_reason"] = "no_progress"
         return "Compile aborted after repeated rounds without meaningful wiki progress"
     return None
@@ -632,8 +651,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                                 "content": result_text,
                             }
                         )
-                telemetry["progress_events"] += 1 if progress_made else 0
-                telemetry["no_progress_rounds"] = 0 if progress_made else telemetry["no_progress_rounds"] + 1
+                _mark_progress_event(telemetry, progress_made=progress_made)
                 if target.run_id:
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:
@@ -731,8 +749,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                                 "content": result_text,
                             }
                         )
-                telemetry["progress_events"] += 1 if progress_made else 0
-                telemetry["no_progress_rounds"] = 0 if progress_made else telemetry["no_progress_rounds"] + 1
+                _mark_progress_event(telemetry, progress_made=progress_made)
                 if target.run_id:
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     LLMWIKI_COMPILE_DRY_RUN: bool = False
     LLMWIKI_COMPILE_RUN_TIMEOUT_SECONDS: int = 900
     LLMWIKI_COMPILE_NO_PROGRESS_ROUNDS: int = 8
+    LLMWIKI_COMPILE_NO_PROGRESS_GRACE_SECONDS: int = 300
     LLMWIKI_COMPILE_STALE_AFTER_SECONDS: int = 1800
 
     QUOTA_MAX_PAGES: int = 500  # per-user page limit (free tier)
