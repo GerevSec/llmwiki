@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +19,7 @@ from services.periodic_compile import (  # noqa: E402
     filter_pending_sources,
     run_target,
 )
+from services.openrouter_client import post_openrouter_chat_completion  # noqa: E402
 from services.wiki_streamlining import _extract_json_payload  # noqa: E402
 from api_key_auth import hash_api_key  # noqa: E402
 
@@ -282,6 +284,7 @@ async def test_invoke_openrouter_repairs_invalid_tool_argument_json(monkeypatch)
             return None
 
         async def post(self, url, headers, json):
+            captured.setdefault("payloads", []).append(json)
             return FakeResponse(responses.pop(0))
 
     class AcquireCtx:
@@ -318,8 +321,61 @@ async def test_invoke_openrouter_repairs_invalid_tool_argument_json(monkeypatch)
         "path": "/wiki/foo.md",
         "content": 'The page is called "Foo".',
     }
+    assert captured["payloads"][0]["plugins"] == [{"id": "context-compression"}]
     assert result["request_id"] == "or_2"
     assert result["stop_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_post_openrouter_chat_completion_surfaces_error_detail():
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"message": "Prompt is too long. Enable context compression."}},
+    )
+
+    class FakeClient:
+        async def post(self, url, headers, json):
+            return response
+
+    with pytest.raises(RuntimeError, match="Prompt is too long. Enable context compression."):
+        await post_openrouter_chat_completion(
+            FakeClient(),
+            api_key="test-key",
+            title="LLM Wiki",
+            payload={"model": "openrouter/test", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+
+@pytest.mark.asyncio
+async def test_post_openrouter_chat_completion_preserves_explicit_plugins():
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id": "or-ok", "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}]}
+
+    class FakeClient:
+        async def post(self, url, headers, json):
+            captured["payload"] = json
+            return FakeResponse()
+
+    await post_openrouter_chat_completion(
+        FakeClient(),
+        api_key="test-key",
+        title="LLM Wiki",
+        payload={
+            "model": "openrouter/test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "plugins": [{"id": "response-healing"}],
+        },
+    )
+
+    assert captured["payload"]["plugins"] == [{"id": "response-healing"}]
 
 
 def test_extract_json_payload_repairs_embedded_quotes_inside_code_fence():

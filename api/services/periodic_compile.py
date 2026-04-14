@@ -19,11 +19,11 @@ from services.compile_tools import (
 )
 from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
+from services.openrouter_client import post_openrouter_chat_completion
 from services.wiki_releases import create_draft_release, get_release_pages, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 ANTHROPIC_SUCCESS_STOP_REASONS = {"end_turn", "stop_sequence"}
 OPENROUTER_SUCCESS_FINISH_REASONS = {"stop"}
 SUPPORTED_PROVIDERS = {"anthropic", "openrouter"}
@@ -656,12 +656,6 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
 
 
 async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, Any]:
-    headers = {
-        "Authorization": f"Bearer {target.provider_api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": settings.APP_URL,
-        "X-Title": "LLM Wiki",
-    }
     tools = tool_definitions_openrouter()
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
@@ -677,10 +671,11 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                     async with tool_pool.acquire() as telemetry_conn:
                         await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 raise RuntimeError(abort_reason)
-            response = await client.post(
-                OPENROUTER_API_URL,
-                headers=headers,
-                json={
+            data = await post_openrouter_chat_completion(
+                client,
+                api_key=target.provider_api_key,
+                title="LLM Wiki",
+                payload={
                     "model": target.model,
                     "messages": messages,
                     "tools": tools,
@@ -688,8 +683,6 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                     "max_tokens": target.max_tokens,
                 },
             )
-            response.raise_for_status()
-            data = response.json()
             telemetry["provider_requests"] += 1
             if data.get("id"):
                 telemetry["provider_request_ids"].append(data["id"])

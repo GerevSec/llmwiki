@@ -11,10 +11,10 @@ import httpx
 from config import settings
 from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
+from services.openrouter_client import post_openrouter_chat_completion
 from services.periodic_compile import (
     ANTHROPIC_API_URL,
     ANTHROPIC_VERSION,
-    OPENROUTER_API_URL,
     default_model_for_provider,
     next_run_at,
 )
@@ -296,22 +296,16 @@ async def _invoke_streamlining_provider(prompt: str, target: StreamliningTarget)
             text = "\n".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
             return {"request_id": data.get("id", ""), "text": text}
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            OPENROUTER_API_URL,
-            headers={
-                "Authorization": f"Bearer {target.provider_api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": settings.APP_URL,
-                "X-Title": "LLM Wiki Streamlining",
-            },
-            json={
+        data = await post_openrouter_chat_completion(
+            client,
+            api_key=target.provider_api_key,
+            title="LLM Wiki Streamlining",
+            payload={
                 "model": target.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": settings.LLMWIKI_COMPILE_DEFAULT_MAX_TOKENS,
             },
         )
-        response.raise_for_status()
-        data = response.json()
         message = data["choices"][0].get("message", {})
         return {"request_id": data.get("id", ""), "text": message.get("content") or ""}
 
