@@ -129,6 +129,25 @@ def _serialize_pending_source(source: PendingSource) -> dict[str, Any]:
     }
 
 
+def _chunk_pending_sources(sources: list[PendingSource], *, batch_size: int) -> list[list[PendingSource]]:
+    size = max(1, batch_size)
+    return [sources[index:index + size] for index in range(0, len(sources), size)]
+
+
+def _effective_recompile_batch_size(target: CompileTarget) -> int:
+    if not target.reset_wiki:
+        return target.max_sources
+    return max(1, min(target.max_sources, settings.LLMWIKI_RECOMPILE_BATCH_MAX_SOURCES))
+
+
+def _build_recompile_batch_instructions(batch_index: int, total_batches: int) -> str:
+    return (
+        f"This is batch {batch_index} of {total_batches} in a from-scratch rebuild. "
+        "Continue updating the same draft wiki with only the listed sources for this batch. "
+        "Preserve draft wiki pages created earlier in this rebuild, and do not restart from zero."
+    )
+
+
 def filter_pending_sources(
     document_rows: list[dict[str, Any]],
     checkpoint_versions: dict[str, int],
@@ -516,20 +535,29 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                     created_by_run_id=run_id,
                     preserve_existing_pages=not target.reset_wiki,
                 )
-                structure_guidance = "" if target.reset_wiki else await build_compile_wiki_structure_guidance(conn, kb["id"])
-                merged_prompt = "\n\n".join(part for part in [target.prompt.strip(), structure_guidance.strip()] if part)
-                prompt = build_compile_prompt(kb["slug"], pending, merged_prompt)
-                response = await _invoke_provider(
-                    prompt,
-                    replace(
-                        target,
-                        wiki_release_id=draft_release_id,
-                        knowledge_base_id=kb["id"],
-                        run_id=run_id,
-                        run_started_at=datetime.now(UTC),
-                        pending_source_paths=tuple(source.full_path for source in pending),
-                    ),
-                )
+                run_started_at = datetime.now(UTC)
+                source_batches = _chunk_pending_sources(pending, batch_size=_effective_recompile_batch_size(target))
+                batch_responses: list[dict[str, Any]] = []
+                for batch_index, source_batch in enumerate(source_batches, start=1):
+                    structure_guidance = "" if target.reset_wiki else await build_compile_wiki_structure_guidance(conn, kb["id"])
+                    prompt_parts = [target.prompt.strip(), structure_guidance.strip()]
+                    if target.reset_wiki and len(source_batches) > 1:
+                        prompt_parts.append(_build_recompile_batch_instructions(batch_index, len(source_batches)))
+                    merged_prompt = "\n\n".join(part for part in prompt_parts if part)
+                    prompt = build_compile_prompt(kb["slug"], source_batch, merged_prompt)
+                    batch_responses.append(
+                        await _invoke_provider(
+                            prompt,
+                            replace(
+                                target,
+                                wiki_release_id=draft_release_id,
+                                knowledge_base_id=kb["id"],
+                                run_id=run_id,
+                                run_started_at=run_started_at,
+                                pending_source_paths=tuple(source.full_path for source in source_batch),
+                            ),
+                        )
+                    )
 
                 quality_report = await publish_release(
                     conn,
@@ -539,7 +567,13 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                     mode="compile",
                 )
                 await _mark_sources_compiled(conn, run_id, kb["id"], pending)
-                await _finish_run(conn, run_id, "succeeded", response_excerpt=response["text_excerpt"])
+                response_excerpt = "\n\n".join(
+                    item["text_excerpt"].strip()
+                    for item in batch_responses
+                    if item.get("text_excerpt")
+                )[:4000] or None
+                response = batch_responses[-1]
+                await _finish_run(conn, run_id, "succeeded", response_excerpt=response_excerpt)
                 await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
                 for source in pending:
                     await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")

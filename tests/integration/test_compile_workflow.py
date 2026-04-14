@@ -259,6 +259,56 @@ async def test_recompile_from_scratch_resets_checkpoints_and_rebuilds_wiki(clien
 
 
 @pytest.mark.asyncio
+async def test_recompile_from_scratch_batches_large_resets(client, pool, monkeypatch):
+    extra_sources = [
+        ("bbbbbbbb-2222-1111-1111-111111111111", "source-2.md", "Source 2", "Second source"),
+        ("cccccccc-2222-1111-1111-111111111111", "source-3.md", "Source 3", "Third source"),
+    ]
+    for doc_id, filename, title, content in extra_sources:
+        await pool.execute(
+            "INSERT INTO documents (id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
+            "VALUES ($1, $2, $3, $4, $5, '/', 'md', 'ready', $6, 1)",
+            doc_id,
+            KB_A_ID,
+            USER_A_ID,
+            filename,
+            title,
+            content,
+        )
+
+    batch_paths: list[tuple[str, ...]] = []
+    release_ids: list[str | None] = []
+
+    async def fake_invoke(prompt, target):
+        batch_paths.append(target.pending_source_paths)
+        release_ids.append(target.wiki_release_id)
+        return {
+            "stop_reason": "stop",
+            "request_id": f"req-batch-{len(batch_paths)}",
+            "text_excerpt": f"AUTOMATION SUMMARY\n- Batch {len(batch_paths)} complete",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+    monkeypatch.setattr("services.periodic_compile.settings.LLMWIKI_RECOMPILE_BATCH_MAX_SOURCES", 2)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/recompile-from-scratch",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert [len(batch) for batch in batch_paths] == [2, 1]
+    assert len(set(release_ids)) == 1
+
+    checkpoint_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM compiled_source_checkpoints WHERE knowledge_base_id = $1",
+        KB_A_ID,
+    )
+    assert checkpoint_count == 3
+
+
+@pytest.mark.asyncio
 async def test_recompile_from_scratch_clears_stale_required_page_links(client, pool, monkeypatch):
     stale_page_ids = [
         "bbbbbbbb-1111-1111-1111-111111111111",

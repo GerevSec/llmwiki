@@ -43,6 +43,18 @@ interface CompileRun {
   finished_at: string | null
 }
 
+interface StreamliningRun {
+  id: string
+  status: string
+  model: string
+  provider: string
+  scope_type: string
+  response_excerpt: string | null
+  error_message: string | null
+  started_at: string
+  finished_at: string | null
+}
+
 interface CompileSchedule {
   knowledge_base: string
   enabled: boolean
@@ -153,6 +165,7 @@ function ScheduleCard({
   schedule,
   pendingCount,
   runs,
+  streamliningRuns,
   members,
   saving,
   running,
@@ -173,6 +186,7 @@ function ScheduleCard({
   schedule: CompileSchedule | undefined
   pendingCount: number | undefined
   runs: CompileRun[]
+  streamliningRuns: StreamliningRun[]
   members: Member[]
   saving: boolean
   running: boolean
@@ -563,6 +577,35 @@ function ScheduleCard({
           )}
         </div>
       )}
+
+      {isAdmin && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Recent streamlining runs</div>
+          {streamliningRuns.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No streamlining runs yet.</p>
+          ) : (
+            streamliningRuns.map((run) => (
+              <div key={run.id} className="rounded-md bg-muted/40 px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className={run.status === 'succeeded' ? 'text-green-600 dark:text-green-400' : run.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}>
+                      {run.status}
+                    </span>
+                    <span className="text-muted-foreground">{run.provider}</span>
+                    <span className="text-muted-foreground">{run.scope_type}</span>
+                  </div>
+                  <span className="text-muted-foreground">{new Date(run.started_at).toLocaleString()}</span>
+                </div>
+                {run.error_message ? (
+                  <p className="mt-1 text-destructive/80">{run.error_message}</p>
+                ) : run.response_excerpt ? (
+                  <p className="mt-1 line-clamp-2 text-muted-foreground">{run.response_excerpt}</p>
+                ) : null}
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -586,6 +629,7 @@ export default function SettingsPage() {
   const [deleteConfirmation, setDeleteConfirmation] = React.useState('')
   const [pendingCounts, setPendingCounts] = React.useState<Record<string, number>>({})
   const [compileRuns, setCompileRuns] = React.useState<Record<string, CompileRun[]>>({})
+  const [streamliningRuns, setStreamliningRuns] = React.useState<Record<string, StreamliningRun[]>>({})
   const [schedules, setSchedules] = React.useState<Record<string, CompileSchedule>>({})
   const [membersByKb, setMembersByKb] = React.useState<Record<string, Member[]>>({})
   const oauthConfigJson = buildOAuthMcpConfig()
@@ -600,9 +644,10 @@ export default function SettingsPage() {
     if (!token || kbLoading || knowledgeBases.length === 0) return
     const adminKbs = knowledgeBases.filter((kb) => ADMIN_ROLES.has(kb.role))
     Promise.all(adminKbs.map(async (kb) => {
-      const [preview, runs, schedule, members] = await Promise.all([
+      const [preview, runs, streamlining, schedule, members] = await Promise.all([
         apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
         apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
+        apiFetch<StreamliningRun[]>(`/v1/knowledge-bases/${kb.id}/streamlining-runs?limit=5`, token).catch(() => []),
         apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token).catch(() => ({
           knowledge_base: kb.slug,
           enabled: false,
@@ -632,10 +677,11 @@ export default function SettingsPage() {
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
       ])
-      return { kbId: kb.id, preview, runs, schedule, members }
+      return { kbId: kb.id, preview, runs, streamlining, schedule, members }
     })).then((results) => {
       setPendingCounts(Object.fromEntries(results.map((r) => [r.kbId, r.preview.pending_source_count])))
       setCompileRuns(Object.fromEntries(results.map((r) => [r.kbId, r.runs])))
+      setStreamliningRuns(Object.fromEntries(results.map((r) => [r.kbId, r.streamlining])))
       setSchedules(Object.fromEntries(results.map((r) => [r.kbId, r.schedule])))
       setMembersByKb(Object.fromEntries(results.map((r) => [r.kbId, r.members])))
     }).catch(() => {})
@@ -657,52 +703,55 @@ export default function SettingsPage() {
 
   const refreshKbAdminData = async (kb: KnowledgeBase) => {
     if (!token || !ADMIN_ROLES.has(kb.role)) return
-    const [preview, runs, schedule, members] = await Promise.all([
+    const [preview, runs, streamlining, schedule, members] = await Promise.all([
       apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
       apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
+      apiFetch<StreamliningRun[]>(`/v1/knowledge-bases/${kb.id}/streamlining-runs?limit=5`, token).catch(() => []),
       apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token),
       apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token),
     ])
     setPendingCounts((prev) => ({ ...prev, [kb.id]: preview.pending_source_count }))
     setCompileRuns((prev) => ({ ...prev, [kb.id]: runs }))
+    setStreamliningRuns((prev) => ({ ...prev, [kb.id]: streamlining }))
     setSchedules((prev) => ({ ...prev, [kb.id]: schedule }))
     setMembersByKb((prev) => ({ ...prev, [kb.id]: members }))
   }
 
   const handleCompileNow = async (kbId: string, kbName: string) => {
     if (!token) return
+    const kb = knowledgeBases.find((item) => item.id === kbId)
     setRunningKbId(kbId)
     try {
       const result = await apiFetch<{ status: string; source_count: number }>(`/v1/knowledge-bases/${kbId}/compile-now`, token, { method: 'POST' })
       if (result.status === 'skipped') toast.success(`No new sources to compile for ${kbName}`)
       else toast.success(`Compiled ${result.source_count} source${result.source_count === 1 ? '' : 's'} for ${kbName}`)
-      const kb = knowledgeBases.find((item) => item.id === kbId)
-      if (kb) await refreshKbAdminData(kb)
     } catch (err) {
       toast.error((err as Error).message || 'Compile failed')
     } finally {
+      if (kb) await refreshKbAdminData(kb).catch(() => {})
       setRunningKbId(null)
     }
   }
 
   const handleStreamlineNow = async (kbId: string, kbName: string) => {
     if (!token) return
+    const kb = knowledgeBases.find((item) => item.id === kbId)
     setRunningStreamliningKbId(kbId)
     try {
       const result = await apiFetch<{ status: string; scope_type?: string }>(`/v1/knowledge-bases/${kbId}/streamline-now?force_full=true`, token, { method: 'POST' })
       if (result.status === 'skipped') toast.success(`No streamlining changes needed for ${kbName}`)
       else toast.success(`Streamlining completed for ${kbName}`)
-      const kb = knowledgeBases.find((item) => item.id === kbId)
-      if (kb) await refreshKbAdminData(kb)
     } catch (err) {
       toast.error((err as Error).message || 'Streamlining failed')
     } finally {
+      if (kb) await refreshKbAdminData(kb).catch(() => {})
       setRunningStreamliningKbId(null)
     }
   }
 
   const handleRecompileFromScratch = async (kbId: string, kbName: string) => {
     if (!token) return
+    const kb = knowledgeBases.find((item) => item.id === kbId)
     setRebuildingKbId(kbId)
     try {
       const result = await apiFetch<{ status: string; source_count: number; reset_source_count: number }>(
@@ -715,11 +764,10 @@ export default function SettingsPage() {
           ? `Recompiled ${result.source_count} source${result.source_count === 1 ? '' : 's'} from scratch for ${kbName}`
           : `Recompile reset ${result.reset_source_count} source${result.reset_source_count === 1 ? '' : 's'} for ${kbName}`,
       )
-      const kb = knowledgeBases.find((item) => item.id === kbId)
-      if (kb) await refreshKbAdminData(kb)
     } catch (err) {
       toast.error((err as Error).message || 'Recompile from scratch failed')
     } finally {
+      if (kb) await refreshKbAdminData(kb).catch(() => {})
       setRebuildingKbId(null)
     }
   }
@@ -886,6 +934,7 @@ export default function SettingsPage() {
               schedule={schedules[kb.id]}
               pendingCount={pendingCounts[kb.id]}
               runs={compileRuns[kb.id] || []}
+              streamliningRuns={streamliningRuns[kb.id] || []}
               members={membersByKb[kb.id] || []}
               saving={savingScheduleKbId === kb.id}
               running={runningKbId === kb.id}
