@@ -307,6 +307,29 @@ def _mark_progress_event(telemetry: dict[str, Any], *, progress_made: bool) -> N
         telemetry["last_meaningful_progress_at"] = datetime.now(UTC).isoformat()
 
 
+def _openrouter_message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def _openrouter_completion_succeeded(message: dict[str, Any], finish_reason: str | None) -> bool:
+    if finish_reason in OPENROUTER_SUCCESS_FINISH_REASONS:
+        return True
+    if finish_reason is None and _openrouter_message_text(message).strip():
+        return True
+    return False
+
+
 async def _update_run_telemetry(
     conn: asyncpg.Connection,
     run_id: str,
@@ -755,7 +778,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                     async with tool_pool.acquire() as telemetry_conn:
                         await _update_run_telemetry(telemetry_conn, target.run_id, telemetry, progress=progress_made)
                 continue
-            if finish_reason not in OPENROUTER_SUCCESS_FINISH_REASONS:
+            if not _openrouter_completion_succeeded(message, finish_reason):
                 if target.run_id:
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:
@@ -768,7 +791,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
             return {
                 "stop_reason": finish_reason or "unknown",
                 "request_id": data.get("id", ""),
-                "text_excerpt": (message.get("content") or "")[:2000],
+                "text_excerpt": _openrouter_message_text(message)[:2000],
             }
     raise RuntimeError("OpenRouter compile exceeded tool round limit")
 

@@ -18,6 +18,8 @@ from services.periodic_compile import (  # noqa: E402
     _invoke_openrouter,
     _mark_progress_event,
     _new_compile_telemetry,
+    _openrouter_completion_succeeded,
+    _openrouter_message_text,
     build_compile_prompt,
     filter_pending_sources,
     run_target,
@@ -207,6 +209,16 @@ class TestPeriodicCompileHelpers:
         assert _compile_abort_reason(target, telemetry) is None
         assert telemetry["last_meaningful_progress_at"] is not None
 
+    def test_openrouter_completion_accepts_nonempty_message_when_finish_reason_missing(self):
+        message = {"content": "AUTOMATION SUMMARY\n- Updated wiki"}
+
+        assert _openrouter_completion_succeeded(message, None) is True
+
+    def test_openrouter_message_text_supports_block_content(self):
+        message = {"content": [{"type": "text", "text": "Line 1"}, {"type": "text", "text": "Line 2"}]}
+
+        assert _openrouter_message_text(message) == "Line 1\nLine 2"
+
 
 @pytest.mark.asyncio
 async def test_invoke_anthropic_retries_pause_turn_then_succeeds(monkeypatch):
@@ -386,6 +398,55 @@ async def test_invoke_openrouter_repairs_invalid_tool_argument_json(monkeypatch)
     assert captured["payloads"][0]["plugins"] == [{"id": "context-compression"}]
     assert result["request_id"] == "or_2"
     assert result["stop_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_invoke_openrouter_accepts_missing_finish_reason_when_message_has_text(monkeypatch):
+    responses = [
+        {
+            "id": "or_1",
+            "choices": [
+                {
+                    "finish_reason": None,
+                    "message": {"content": "AUTOMATION SUMMARY\n- Updated wiki"},
+                }
+            ],
+        }
+    ]
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            return FakeResponse(responses.pop(0))
+
+    monkeypatch.setattr("services.periodic_compile.httpx.AsyncClient", FakeClient)
+
+    result = await _invoke_openrouter(
+        "Compile now",
+        CompileTarget("kb", "test-key", "", 10, "openrouter", "openrouter/test", 4, 1024, "user-1"),
+    )
+
+    assert result["request_id"] == "or_1"
+    assert result["stop_reason"] == "unknown"
+    assert "AUTOMATION SUMMARY" in result["text_excerpt"]
 
 
 @pytest.mark.asyncio
