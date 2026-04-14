@@ -55,6 +55,8 @@ class CompileTarget:
     knowledge_base_id: str | None = None
     run_id: str | None = None
     run_started_at: datetime | None = None
+    force_all_sources: bool = False
+    reset_wiki: bool = False
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,7 @@ def _new_compile_telemetry() -> dict[str, Any]:
         "tool_rounds": 0,
         "tool_calls": 0,
         "tool_calls_by_name": {},
+        "distinct_tool_signatures": 0,
         "continuations": 0,
         "no_progress_rounds": 0,
         "progress_events": 0,
@@ -254,6 +257,10 @@ def _tool_result_made_progress(tool_name: str, result_text: str) -> bool:
         return False
     lowered = (result_text or "").strip().lower()
     return bool(lowered) and not lowered.startswith("error:")
+
+
+def _tool_signature(tool_name: str, arguments: dict[str, Any] | None) -> str:
+    return f"{tool_name}:{json.dumps(arguments or {}, sort_keys=True, default=str)}"
 
 
 async def _update_run_telemetry(
@@ -273,7 +280,8 @@ async def _update_run_telemetry(
 
 async def _cleanup_stale_compile_runs(conn: asyncpg.Connection, *, stale_after_seconds: int) -> int:
     rows = await conn.fetch(
-        "SELECT id::text AS id FROM compile_runs WHERE status = 'running' AND started_at < now() - make_interval(secs => $1)",
+        "SELECT id::text AS id FROM compile_runs "
+        "WHERE status = 'running' AND COALESCE(last_progress_at, started_at) < now() - make_interval(secs => $1)",
         stale_after_seconds,
     )
     if not rows:
@@ -290,6 +298,8 @@ async def get_compile_context(
     pool_or_conn,
     knowledge_base_slug: str,
     max_sources: int,
+    *,
+    ignore_checkpoints: bool = False,
 ) -> tuple[dict[str, Any], list[PendingSource]]:
     conn = pool_or_conn
     release = None
@@ -318,7 +328,7 @@ async def get_compile_context(
                 kb["id"],
             )
         ]
-        pending = filter_pending_sources(document_rows, checkpoints, max_sources)
+        pending = filter_pending_sources(document_rows, {} if ignore_checkpoints else checkpoints, max_sources)
         return dict(kb), pending
     finally:
         if release:
@@ -391,7 +401,12 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
         if not acquired:
             raise RuntimeError(f"Compile already running for knowledge base '{kb['slug']}'")
         try:
-            _, pending = await get_compile_context(conn, target.knowledge_base, target.max_sources)
+            _, pending = await get_compile_context(
+                conn,
+                target.knowledge_base,
+                target.max_sources,
+                ignore_checkpoints=target.force_all_sources,
+            )
             if not pending:
                 run_id = await _record_run(
                     conn,
@@ -421,8 +436,9 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                     kb["id"],
                     created_by="compile",
                     created_by_run_id=run_id,
+                    preserve_existing_pages=not target.reset_wiki,
                 )
-                structure_guidance = await build_compile_wiki_structure_guidance(conn, kb["id"])
+                structure_guidance = "" if target.reset_wiki else await build_compile_wiki_structure_guidance(conn, kb["id"])
                 merged_prompt = "\n\n".join(part for part in [target.prompt.strip(), structure_guidance.strip()] if part)
                 prompt = build_compile_prompt(kb["slug"], pending, merged_prompt)
                 response = await _invoke_provider(
@@ -506,6 +522,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
     telemetry = _new_compile_telemetry()
+    seen_tool_signatures: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
@@ -551,8 +568,14 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                         if block.get("type") != "tool_use":
                             continue
                         tool_name = block["name"]
+                        tool_input = block.get("input")
                         telemetry["tool_calls"] += 1
                         telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
+                        signature = _tool_signature(tool_name, tool_input)
+                        if signature not in seen_tool_signatures:
+                            seen_tool_signatures.add(signature)
+                            telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
+                            progress_made = True
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -561,7 +584,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                                 wiki_release_id=target.wiki_release_id,
                             ),
                             tool_name,
-                            block.get("input"),
+                            tool_input,
                         )
                         if _tool_result_made_progress(tool_name, result_text):
                             progress_made = True
@@ -606,6 +629,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
     telemetry = _new_compile_telemetry()
+    seen_tool_signatures: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
         for _ in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
@@ -649,8 +673,14 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                 async with tool_pool.acquire() as tool_conn:
                     for tool_call in tool_calls:
                         tool_name = tool_call["function"]["name"]
+                        tool_input = loads_lenient_json(tool_call["function"]["arguments"] or "{}")
                         telemetry["tool_calls"] += 1
                         telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
+                        signature = _tool_signature(tool_name, tool_input)
+                        if signature not in seen_tool_signatures:
+                            seen_tool_signatures.add(signature)
+                            telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
+                            progress_made = True
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -659,7 +689,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                                 wiki_release_id=target.wiki_release_id,
                             ),
                             tool_name,
-                            loads_lenient_json(tool_call["function"]["arguments"] or "{}"),
+                            tool_input,
                         )
                         if _tool_result_made_progress(tool_name, result_text):
                             progress_made = True

@@ -380,6 +380,7 @@ async def create_draft_release(
     *,
     created_by: str,
     created_by_run_id: str | None = None,
+    preserve_existing_pages: bool = True,
 ) -> tuple[str, str]:
     active_release_id = await ensure_initial_wiki_release(conn, knowledge_base_id)
     release_id = str(uuid4())
@@ -391,18 +392,27 @@ async def create_draft_release(
         created_by,
         created_by_run_id,
     )
-    await conn.execute(
-        "INSERT INTO wiki_release_pages (release_id, page_key, path, filename, title, content, tags, sort_order) "
-        "SELECT $1::uuid, page_key, path, filename, title, content, tags, sort_order FROM wiki_release_pages WHERE release_id = $2::uuid",
-        release_id,
-        active_release_id,
-    )
-    await conn.execute(
-        "INSERT INTO wiki_path_aliases (release_id, knowledge_base_id, alias_path, alias_filename, target_page_key, reason, expires_at) "
-        "SELECT $1::uuid, knowledge_base_id, alias_path, alias_filename, target_page_key, reason, expires_at FROM wiki_path_aliases WHERE release_id = $2::uuid",
-        release_id,
-        active_release_id,
-    )
+    if preserve_existing_pages:
+        await conn.execute(
+            "INSERT INTO wiki_release_pages (release_id, page_key, path, filename, title, content, tags, sort_order) "
+            "SELECT $1::uuid, page_key, path, filename, title, content, tags, sort_order FROM wiki_release_pages WHERE release_id = $2::uuid",
+            release_id,
+            active_release_id,
+        )
+        await conn.execute(
+            "INSERT INTO wiki_path_aliases (release_id, knowledge_base_id, alias_path, alias_filename, target_page_key, reason, expires_at) "
+            "SELECT $1::uuid, knowledge_base_id, alias_path, alias_filename, target_page_key, reason, expires_at FROM wiki_path_aliases WHERE release_id = $2::uuid",
+            release_id,
+            active_release_id,
+        )
+    else:
+        await conn.execute(
+            "INSERT INTO wiki_release_pages (release_id, page_key, path, filename, title, content, tags, sort_order) "
+            "SELECT $1::uuid, page_key, path, filename, title, content, tags, sort_order "
+            "FROM wiki_release_pages WHERE release_id = $2::uuid AND (path, filename) IN (('/wiki/', 'overview.md'), ('/wiki/', 'log.md'))",
+            release_id,
+            active_release_id,
+        )
     return release_id, active_release_id
 
 

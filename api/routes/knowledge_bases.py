@@ -695,28 +695,16 @@ async def recompile_knowledge_base_from_scratch(
     if not settings_row or not settings_row["provider_secret_encrypted"]:
         raise HTTPException(status_code=400, detail="Compile provider secret is not configured")
 
-    reset_source_count = await pool.fetchval(
+    source_count = await pool.fetchval(
         "SELECT COUNT(*) FROM documents WHERE knowledge_base_id = $1 AND NOT archived AND path NOT LIKE '/wiki/%%'",
         kb_id,
     )
     conn = await pool.acquire()
     try:
         async with conn.transaction():
-            await conn.execute(
-                "UPDATE documents SET archived = true, updated_at = now(), version = version + 1 "
-                "WHERE knowledge_base_id = $1 AND path LIKE '/wiki/%%' AND NOT archived",
-                kb_id,
-            )
-            await conn.execute("DELETE FROM wiki_path_aliases WHERE knowledge_base_id = $1", kb_id)
-            await conn.execute(
-                "DELETE FROM wiki_release_pages WHERE release_id IN (SELECT id FROM wiki_releases WHERE knowledge_base_id = $1)",
-                kb_id,
-            )
-            await conn.execute("DELETE FROM wiki_releases WHERE knowledge_base_id = $1", kb_id)
             await conn.execute("DELETE FROM wiki_dirty_scope WHERE knowledge_base_id = $1", kb_id)
-            await conn.execute("DELETE FROM compiled_source_checkpoints WHERE knowledge_base_id = $1", kb_id)
             await conn.execute(
-                "UPDATE knowledge_base_settings SET active_wiki_release_id = NULL, last_error = NULL, last_status = NULL, next_run_at = now(), updated_at = now() "
+                "UPDATE knowledge_base_settings SET last_error = NULL, last_status = NULL, next_run_at = now(), updated_at = now() "
                 "WHERE knowledge_base_id = $1",
                 kb_id,
             )
@@ -733,12 +721,14 @@ async def recompile_knowledge_base_from_scratch(
         max_tool_rounds=settings_row["compile_max_tool_rounds"] or default_max_tool_rounds(),
         max_tokens=settings_row["compile_max_tokens"] or default_max_tokens(),
         actor_user_id=kb["owner_user_id"],
+        force_all_sources=True,
+        reset_wiki=True,
     )
     try:
         result = await run_target(pool, target)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return {**result, "reset_source_count": int(reset_source_count or 0)}
+    return {**result, "reset_source_count": int(source_count or 0)}
 
 
 @router.post("/{kb_id}/streamline-now")
