@@ -201,6 +201,30 @@ async def test_streamline_now_merges_duplicate_pages(client, pool, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streamlining_runs_parses_jsonb_quality_report_for_response_model(client, pool):
+    await pool.execute(
+        "INSERT INTO streamlining_runs "
+        "(knowledge_base_id, user_id, status, provider, model, scope_type, scope_snapshot, quality_report, response_excerpt, error_message, started_at, finished_at) "
+        "VALUES ($1, $2, 'succeeded', 'openrouter', 'openrouter/test', 'targeted', '[]'::jsonb, $3::jsonb, 'done', NULL, now(), now())",
+        KB_A_ID,
+        USER_A_ID,
+        '{"kept_pages": 3, "rewritten_links": 1}',
+    )
+
+    response = await client.get(
+        f"/v1/knowledge-bases/{KB_A_ID}/streamlining-runs?limit=5",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["quality_report"] == {
+        "kept_pages": 3,
+        "rewritten_links": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_streamline_now_resolves_fuzzy_merge_paths(client, pool, monkeypatch):
     weird_source_id = "ffffffff-1111-1111-1111-111111111111"
     weird_target_id = "99999999-1111-1111-1111-111111111111"

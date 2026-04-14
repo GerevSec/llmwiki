@@ -1,3 +1,4 @@
+import json
 import re
 import secrets
 from datetime import UTC, datetime
@@ -208,6 +209,18 @@ def _resolved_max_tool_rounds(value: int | None) -> int:
 
 def _resolved_max_tokens(value: int | None) -> int:
     return value or default_max_tokens()
+
+
+def _coerce_json_object(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 _OVERVIEW_TEMPLATE = """\
@@ -447,7 +460,7 @@ async def list_compile_runs(
         kb_id,
         limit,
     )
-    return [dict(row) for row in rows]
+    return [{**dict(row), "telemetry": _coerce_json_object(row["telemetry"])} for row in rows]
 
 
 @router.get("/{kb_id}/streamlining-runs", response_model=list[StreamliningRunOut])
@@ -468,7 +481,7 @@ async def list_streamlining_runs(
         kb_id,
         limit,
     )
-    return [dict(row) for row in rows]
+    return [{**dict(row), "quality_report": _coerce_json_object(row["quality_report"])} for row in rows]
 
 
 @router.get("/{kb_id}/compile-schedule", response_model=KnowledgeBaseSettingsOut)

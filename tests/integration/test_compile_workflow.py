@@ -129,6 +129,31 @@ async def test_compile_schedule_defaults_are_high_enough(client):
 
 
 @pytest.mark.asyncio
+async def test_compile_runs_parses_jsonb_telemetry_for_response_model(client, pool):
+    await pool.execute(
+        "INSERT INTO compile_runs "
+        "(knowledge_base_id, user_id, status, model, provider, source_count, source_snapshot, response_excerpt, telemetry, started_at, finished_at) "
+        "VALUES ($1, $2, 'failed', 'openrouter/test', 'openrouter', 1, '[]'::jsonb, NULL, $3::jsonb, now(), now())",
+        KB_A_ID,
+        USER_A_ID,
+        '{"tool_calls": 2, "tool_rounds": 1, "provider_request_ids": ["req-1"]}',
+    )
+
+    response = await client.get(
+        f"/v1/knowledge-bases/{KB_A_ID}/compile-runs?limit=5",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["telemetry"] == {
+        "tool_calls": 2,
+        "tool_rounds": 1,
+        "provider_request_ids": ["req-1"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_enabling_schedule_requires_secret_when_missing(client, pool):
     await pool.execute(
         "UPDATE knowledge_base_settings SET provider_secret_encrypted = NULL WHERE knowledge_base_id = $1",
