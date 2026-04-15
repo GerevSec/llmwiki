@@ -289,6 +289,39 @@ async def test_recompile_from_scratch_resets_checkpoints_and_rebuilds_wiki(clien
 
 
 @pytest.mark.asyncio
+async def test_recompile_from_scratch_uses_kb_configured_model_and_budget(client, pool, monkeypatch):
+    await pool.execute(
+        "UPDATE knowledge_base_settings SET compile_model = 'minimax/minimax-m2.7', compile_max_tokens = 8000 WHERE knowledge_base_id = $1",
+        KB_A_ID,
+    )
+    captured = {}
+
+    async def fake_invoke(prompt, target):
+        captured["provider"] = target.provider
+        captured["model"] = target.model
+        captured["max_tokens"] = target.max_tokens
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-reset-config",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Rebuilt wiki",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    response = await client.post(
+        f"/v1/knowledge-bases/{KB_A_ID}/recompile-from-scratch",
+        headers=auth_headers(USER_A_ID),
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "provider": "openrouter",
+        "model": "minimax/minimax-m2.7",
+        "max_tokens": 8000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_recompile_from_scratch_batches_large_resets(client, pool, monkeypatch):
     extra_sources = [
         ("bbbbbbbb-2222-1111-1111-111111111111", "source-2.md", "Source 2", "Second source"),

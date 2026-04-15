@@ -19,6 +19,7 @@ from services.periodic_compile import (  # noqa: E402
     _invoke_openrouter,
     _mark_progress_event,
     _new_compile_telemetry,
+    _openrouter_empty_terminal_response,
     _openrouter_completion_succeeded,
     _openrouter_message_text,
     _run_timeout_seconds,
@@ -256,6 +257,12 @@ class TestPeriodicCompileHelpers:
 
         assert _openrouter_message_text(message) == "Line 1\nLine 2"
 
+    def test_openrouter_empty_terminal_response_detects_zero_token_null_reply(self):
+        data = {"usage": {"total_tokens": 0}}
+        message = {"content": None, "reasoning": None}
+
+        assert _openrouter_empty_terminal_response(data, message, None) is True
+
 
 @pytest.mark.asyncio
 async def test_invoke_anthropic_retries_pause_turn_then_succeeds(monkeypatch):
@@ -484,6 +491,101 @@ async def test_invoke_openrouter_accepts_missing_finish_reason_when_message_has_
     assert result["request_id"] == "or_1"
     assert result["stop_reason"] == "unknown"
     assert "AUTOMATION SUMMARY" in result["text_excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_openrouter_retries_empty_zero_token_terminal_response(monkeypatch):
+    responses = [
+        {
+            "id": "or_1",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "guide", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+        {
+            "id": "or_2",
+            "choices": [
+                {
+                    "finish_reason": None,
+                    "message": {"content": None, "reasoning": None},
+                }
+            ],
+            "usage": {"total_tokens": 0},
+        },
+        {
+            "id": "or_3",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": "AUTOMATION SUMMARY\n- Updated wiki"},
+                }
+            ],
+        },
+    ]
+
+    class FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            return FakeResponse(responses.pop(0))
+
+    class AcquireCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return AcquireCtx()
+
+    async def fake_get_pool():
+        return FakePool()
+
+    async def fake_execute_tool(context, name, arguments):
+        return "ok"
+
+    monkeypatch.setattr("services.periodic_compile.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("services.periodic_compile._get_pool_for_tools", fake_get_pool)
+    monkeypatch.setattr("services.periodic_compile.execute_tool", fake_execute_tool)
+
+    result = await _invoke_openrouter(
+        "Compile now",
+        CompileTarget("kb", "test-key", "", 10, "openrouter", "openrouter/test", 4, 1024, "user-1"),
+    )
+
+    assert result["request_id"] == "or_3"
+    assert result["stop_reason"] == "stop"
 
 
 @pytest.mark.asyncio

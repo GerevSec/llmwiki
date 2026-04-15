@@ -361,6 +361,18 @@ def _openrouter_completion_succeeded(message: dict[str, Any], finish_reason: str
     return False
 
 
+def _openrouter_empty_terminal_response(data: dict[str, Any], message: dict[str, Any], finish_reason: str | None) -> bool:
+    usage = data.get("usage") or {}
+    total_tokens = usage.get("total_tokens")
+    return (
+        finish_reason is None
+        and not (message.get("tool_calls") or [])
+        and not _openrouter_message_text(message).strip()
+        and not message.get("reasoning")
+        and total_tokens == 0
+    )
+
+
 async def _update_run_telemetry(
     conn: asyncpg.Connection,
     run_id: str,
@@ -824,6 +836,12 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:
                         await _update_run_telemetry(telemetry_conn, target.run_id, telemetry, progress=progress_made)
+                continue
+            if _openrouter_empty_terminal_response(data, message, finish_reason):
+                if target.run_id:
+                    tool_pool = await _get_pool_for_tools()
+                    async with tool_pool.acquire() as telemetry_conn:
+                        await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 continue
             if not _openrouter_completion_succeeded(message, finish_reason):
                 if target.run_id:
