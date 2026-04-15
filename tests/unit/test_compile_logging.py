@@ -89,6 +89,79 @@ class TestLogStreamline:
         assert "scope_type=full" in record.getMessage()
 
 
+class TestToolWriteCreatePathHandling:
+    """Regression: tool_write create must treat a .md path as a full file path,
+    not as a directory. Previously `/wiki/foo.md` was coerced to
+    `/wiki/foo.md/foo.md`, which made models unable to find their own writes
+    and caused compile loops to spin until aborted."""
+
+    def _run_create(self, path: str, title: str):
+        import asyncio
+
+        from services.compile_tools import ToolContext, tool_write
+
+        captured: dict = {}
+
+        class StubPool:
+            async def fetchrow(self, query, *args):
+                if "knowledge_base_memberships" in query:
+                    return {
+                        "id": "kb-id",
+                        "slug": "kb",
+                        "name": "KB",
+                        "role": "owner",
+                        "owner_user_id": "user-id",
+                    }
+                if "INSERT INTO documents" in query:
+                    # args positional: knowledge_base_id, user_id, filename, title, path, content, tags
+                    return {"path": args[4], "filename": args[2]}
+                if "FROM documents" in query:
+                    return None
+                return None
+
+            async def fetch(self, query, *args):
+                return []
+
+            async def execute(self, query, *args):
+                return "OK"
+
+        # Intercept the wiki-release write path by providing no release_id.
+        ctx = ToolContext(
+            pool=StubPool(),
+            user_id="user-id",
+            knowledge_base_slug="kb",
+            wiki_release_id=None,
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                tool_write(ctx, command="create", path=path, title=title, content="x")
+            )
+        finally:
+            loop.close()
+        return result
+
+    def test_full_file_path_with_md_extension_is_not_nested(self):
+        """Calling create with path=/wiki/product-strategy.md must emit
+        Created `/wiki/product-strategy.md`, NOT `/wiki/product-strategy.md/product-strategy.md`."""
+        result = self._run_create("/wiki/product-strategy.md", "Product Strategy")
+        assert "/wiki/product-strategy.md/product-strategy.md" not in result, (
+            f"Path was nested (the bug): {result}"
+        )
+        assert "/wiki/product-strategy.md" in result
+
+    def test_directory_style_path_still_generates_filename_from_title(self):
+        """Calling create with path=/wiki/ + title=Foo Bar should still derive
+        filename foo-bar.md from the title."""
+        result = self._run_create("/wiki/", "Foo Bar")
+        assert "/wiki/foo-bar.md" in result
+
+    def test_nested_md_path_under_subdirectory(self):
+        result = self._run_create("/wiki/people/ayal.md", "Ayal")
+        assert "/wiki/people/ayal.md" in result
+        assert "/wiki/people/ayal.md/ayal.md" not in result
+
+
 class TestWikiStreamliningImport:
     def test_rename_release_page_is_importable(self):
         """Regression: wiki_streamlining.py must import rename_release_page so that

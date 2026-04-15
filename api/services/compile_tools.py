@@ -311,12 +311,24 @@ async def tool_write(
     if command == "create":
         if not title:
             return "Error: title is required."
-        dir_path = path if path.endswith("/") else path + "/"
-        if not dir_path.startswith("/"):
-            dir_path = "/" + dir_path
-        filename = re.sub(r"[^\w\s\-.]", "", title.lower().replace(" ", "-"))
-        if not filename.endswith(".md"):
-            filename += ".md"
+        clean_path = path or "/"
+        if not clean_path.startswith("/"):
+            clean_path = "/" + clean_path
+        tail = clean_path.rsplit("/", 1)[-1] if "/" in clean_path else clean_path
+        path_is_full_file = (
+            not clean_path.endswith("/")
+            and tail.lower().endswith((".md", ".txt"))
+        )
+        if path_is_full_file:
+            dir_path = clean_path.rsplit("/", 1)[0] + "/"
+            if not dir_path.startswith("/"):
+                dir_path = "/" + dir_path
+            filename = tail
+        else:
+            dir_path = clean_path if clean_path.endswith("/") else clean_path + "/"
+            filename = re.sub(r"[^\w\s\-.]", "", title.lower().replace(" ", "-"))
+            if not filename.endswith(".md"):
+                filename += ".md"
         if context.wiki_release_id and wiki_path:
             row = await upsert_release_page(
                 context.pool,
