@@ -41,6 +41,9 @@ nvidia-10k-first20.md
 # Agents
 .omx/
 .omc/
+.claude/
 
-# db
+# random
 db
+ideas
+mermaid-memory-system-test.html
