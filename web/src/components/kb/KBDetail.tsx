@@ -64,6 +64,17 @@ function isNoteFile(doc: DocumentListItem): boolean {
   return ft === 'md' || ft === 'txt' || ft === 'note'
 }
 
+function wikiRelativePath(doc: { path: string; filename: string }): string {
+  let relative = (doc.path + doc.filename).replace(/^\/wiki\/?/, '')
+  // Collapse legacy nested paths like "architecture.md/architecture-overview.md"
+  // (caused by an old tool_write bug) back to their leaf filename so the
+  // frontend resolves them the same way the tree builder does.
+  while (/^[^/]+\.(md|txt|json)\//i.test(relative)) {
+    relative = relative.replace(/^[^/]+\.(md|txt|json)\//i, '')
+  }
+  return relative
+}
+
 function buildTreeFromDocs(docs: DocumentListItem[]): WikiNode[] {
   // Sort all docs by sort_order first
   const sorted = [...docs].sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999))
@@ -72,9 +83,11 @@ function buildTreeFromDocs(docs: DocumentListItem[]): WikiNode[] {
   const topLevel: Array<{ title: string; path: string; slug: string }> = []
   const childPages = new Map<string, Array<{ title: string; path: string }>>()
 
+  const seenRelative = new Set<string>()
   for (const doc of sorted) {
-    let relative = (doc.path + doc.filename).replace(/^\/wiki\/?/, '')
-    relative = relative.replace(/^([^/]+\.(md|txt|json))\//i, '')
+    const relative = wikiRelativePath(doc)
+    if (seenRelative.has(relative)) continue
+    seenRelative.add(relative)
     const parts = relative.split('/')
     const title =
       doc.title ||
@@ -434,10 +447,10 @@ export function KBDetail({
   // Track the active wiki doc's version to avoid re-fetching on unrelated updates
   const activeWikiDoc = React.useMemo(() => {
     if (!wikiActivePath) return null
-    return wikiDocs.find((d) => {
-      const relative = (d.path + d.filename).replace(/^\/wiki\/?/, '')
-      return relative === wikiActivePath
-    }) ?? null
+    // Match on the same relative path the tree builder uses, so legacy nested
+    // paths (caused by an old tool_write bug that wrote to /wiki/<file>.md/<file>.md)
+    // still resolve when the user clicks them in the menu.
+    return wikiDocs.find((d) => wikiRelativePath(d) === wikiActivePath) ?? null
   }, [wikiActivePath, wikiDocs])
 
   const activeWikiVersion = activeWikiDoc?.version ?? -1

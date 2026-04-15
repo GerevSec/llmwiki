@@ -83,12 +83,118 @@ def _is_wiki_markdown_doc(row: dict[str, Any]) -> bool:
     return is_wiki_path(row.get("path")) and (row.get("file_type") in _WIKI_MARKDOWN_TYPES)
 
 
+def normalize_flat_wiki_path(path: str, filename: str) -> tuple[str, str]:
+    """Force wiki pages to live flat under /wiki/<leaf> (or under a non-.md
+    subdirectory). If any path segment ends in `.md` or `.txt`, it was the
+    result of an old tool_write bug that treated a file path as a directory,
+    so collapse all such segments and keep only the leaf filename.
+
+    Examples:
+        ('/wiki/architecture.md/', 'architecture-overview.md')
+            -> ('/wiki/', 'architecture-overview.md')
+        ('/wiki/foo.md/bar.md/', 'baz.md')
+            -> ('/wiki/', 'baz.md')
+        ('/wiki/architecture/', 'overview.md')
+            -> ('/wiki/architecture/', 'overview.md')   # legitimate subdir
+        ('/wiki/', 'overview.md')
+            -> ('/wiki/', 'overview.md')
+    """
+    cleaned = (path or "/wiki/").strip()
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    if not cleaned.startswith("/wiki/"):
+        return (cleaned if cleaned.endswith("/") else cleaned + "/", filename)
+
+    relative = cleaned[len("/wiki/"):].strip("/")
+    segments = [seg for seg in relative.split("/") if seg]
+
+    kept: list[str] = []
+    for segment in segments:
+        if segment.lower().endswith((".md", ".txt")):
+            # Malformed: a path segment looks like a file. Collapse everything
+            # above this point (and this segment itself) and fall through to
+            # the flat /wiki/<leaf> layout.
+            kept = []
+            continue
+        kept.append(segment)
+
+    dir_path = "/wiki/" + ("/".join(kept) + "/" if kept else "")
+    return dir_path, filename
+
+
 def _normalize_coverage_unit(text: str) -> str:
     normalized = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text or "")
     normalized = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", normalized)
     normalized = re.sub(r"^#+\s*", "", normalized.strip(), flags=re.MULTILINE)
     normalized = re.sub(r"\s+", " ", normalized.strip().lower())
     return normalized.strip(" -\t")
+
+
+def _merge_content_coherently(
+    *,
+    target_content: str,
+    target_title: str | None,
+    source_content: str,
+    source_title: str | None,
+) -> str:
+    """Merge source into target without leaving 'Merged from X' artifacts or
+    duplicating blocks that already exist in the target.
+
+    Strategy:
+      1. Split source into markdown blocks (paragraphs / fences).
+      2. Drop any top-level `# Source Title` block.
+      3. Skip blocks whose normalized content is already present in the target
+         (coverage-unit equality, the same comparator used for dedup).
+      4. If nothing survives, the source adds nothing new — return target
+         verbatim (idempotent merge).
+      5. Otherwise append the surviving blocks under the existing target
+         body with a single blank-line separator. No "Merged from X" header
+         is ever emitted.
+    """
+    target_body = (target_content or "").rstrip()
+    source_body = (source_content or "").strip()
+    if not source_body:
+        return target_body + ("\n" if target_body else "")
+
+    target_units: set[str] = set()
+    for block in re.split(r"\n\s*\n", target_body):
+        normalized_block = _normalize_coverage_unit(block)
+        if normalized_block:
+            target_units.add(normalized_block)
+
+    blocks = re.split(r"\n\s*\n", source_body)
+    new_blocks: list[str] = []
+
+    source_title_slug = (source_title or "").strip().lower()
+    target_title_slug = (target_title or "").strip().lower()
+
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+
+        # Skip the source's top-level `# Title` header entirely — it would
+        # otherwise become a noisy `## Title` style block inside target.
+        header_match = re.match(r"^#{1,2}\s*(.+?)\s*$", stripped)
+        if header_match:
+            header_text = header_match.group(1).strip().lower()
+            if header_text == source_title_slug or header_text == target_title_slug:
+                continue
+
+        normalized = _normalize_coverage_unit(stripped)
+        if normalized and normalized in target_units:
+            continue
+        if len(normalized) < 24 and any(normalized in unit for unit in target_units):
+            continue
+
+        new_blocks.append(stripped)
+        if normalized:
+            target_units.add(normalized)
+
+    if not new_blocks:
+        return target_body + ("\n" if target_body else "")
+
+    return target_body + "\n\n" + "\n\n".join(new_blocks) + "\n"
 
 
 def _coverage_units(text: str) -> set[str]:
@@ -508,7 +614,9 @@ async def upsert_release_page(
     sort_order: int = 0,
     page_key: str | None = None,
 ) -> ReleasePage:
-    normalized_path = _normalize_path(path)
+    flat_path, flat_filename = normalize_flat_wiki_path(path, filename)
+    normalized_path = _normalize_path(flat_path)
+    filename = flat_filename
     existing = None
     if page_key:
         existing = await get_release_page_by_page_key(conn, release_id, page_key)
@@ -637,9 +745,12 @@ async def merge_release_pages(
     if not source or not target:
         raise RuntimeError("Source or target page missing for merge")
 
-    merged_content = target.content
-    if _normalize_coverage_unit(source.content) and _normalize_coverage_unit(source.content) not in _normalize_coverage_unit(target.content):
-        merged_content = f"{target.content.rstrip()}\n\n## Merged from {source.title or source.filename}\n\n{source.content.strip()}\n"
+    merged_content = _merge_content_coherently(
+        target_content=target.content,
+        target_title=target.title or target.filename,
+        source_content=source.content,
+        source_title=source.title or source.filename,
+    )
 
     await upsert_release_page(
         conn,
