@@ -128,8 +128,22 @@ Rules:
 - One citation per claim — don't batch unrelated claims
 - Citations render as hoverable popover badges in the UI
 
-### Cross-References
-Link between wiki pages using standard markdown links to other wiki paths.
+### Cross-References — MANDATORY
+
+**Every wiki page MUST link to at least 2 related pages.** Isolated pages are incomplete — they defeat the purpose of a wiki, which is a graph of knowledge the LLM can traverse.
+
+Rules:
+- Every **concept** page links to at least 2 related **entities** (the concrete things the concept touches).
+- Every **entity** page links to at least 2 related **concepts** (the ideas that explain what the entity is or does).
+- Link syntax: `[Page Title](/wiki/concepts/foo.md)` or `[Page Title](/wiki/entities/bar.md)` — always use the full `/wiki/...` path so the UI can resolve it.
+- Put links **inline in prose** wherever you mention a related page by name, AND collect them at the bottom of every page in a `## See Also` section:
+```
+## See Also
+- [Life Agent](/wiki/concepts/life-agent.md) — the orchestration layer this concept feeds into
+- [Be Device](/wiki/entities/be-device.md) — the hardware that captures the signal
+- [Alon Gamzu](/wiki/entities/alon-gamzu.md) — the team lead championing this direction
+```
+- If a page has nothing to link to, you probably missed the point of the source — re-read it and find the connections.
 
 ## Core Workflows
 
