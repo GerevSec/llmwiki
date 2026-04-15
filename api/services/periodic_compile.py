@@ -221,7 +221,7 @@ def build_compile_prompt(knowledge_base: str, sources: list[PendingSource], extr
         "- Prefer a shallow tree: `/wiki/overview.md`, `/wiki/log.md`, and one folder per domain such as `/wiki/architecture/overview.md`, `/wiki/business/pricing.md`, `/wiki/team/members.md`.",
         "- When creating a leaf page, always pass a full file path that ends in `.md` (e.g. `/wiki/team/members.md`). Never pass `/wiki/team.md` as a directory with a separate filename — that produces nested `/wiki/team.md/members.md` paths which the UI cannot navigate.",
         "- Avoid one-entry wrapper directories. If a domain only has one page, put it directly under `/wiki/<domain>.md`.",
-        "- Reuse existing category structure when it is coherent; if a source belongs in an existing section, update that section rather than creating a parallel structure.",
+        "- If a source belongs in an existing section, update that section rather than creating a parallel structure.",
         "",
         "Changed sources:",
     ]

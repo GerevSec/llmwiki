@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,7 +55,6 @@ def _strip_merged_from_artifacts(content: str) -> str:
     the old merge concatenation bug."""
     if "Merged from" not in content:
         return content
-    import re
 
     # Drop any "## Merged from ..." header line (content beneath it stays)
     cleaned = re.sub(r"^\s*##+\s*Merged from.*$", "", content, flags=re.MULTILINE)
