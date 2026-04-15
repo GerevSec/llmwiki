@@ -8,6 +8,7 @@ from fnmatch import fnmatch
 from typing import Any
 
 from services.kb_access import require_kb_access
+from services.wiki_guide import WIKI_GUIDE_TEXT
 from services.wiki_releases import (
     delete_release_page,
     get_release_page_by_full_path,
@@ -159,9 +160,8 @@ async def tool_guide(context: ToolContext) -> str:
         kb["id"],
     )
     return (
-        f"Knowledge base: {kb['name']} (`{kb['slug']}`)\n"
-        f"Sources: {counts['source_count']} | Wiki pages: {counts['wiki_count']}\n\n"
-        "Workflow: read changed sources, update `/wiki/overview.md`, update/create relevant wiki pages, and append an ingest entry to `/wiki/log.md`."
+        WIKI_GUIDE_TEXT
+        + f"- **{kb['name']}** (`{kb['slug']}`) — {counts['source_count']} sources, {counts['wiki_count']} wiki pages"
     )
 
 

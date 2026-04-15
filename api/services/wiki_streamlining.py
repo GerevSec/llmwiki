@@ -20,6 +20,7 @@ from services.periodic_compile import (
     default_model_for_provider,
     next_run_at,
 )
+from services.wiki_guide import WIKI_GUIDE_TEXT
 from services.wiki_releases import (
     add_alias,
     clear_dirty_scope,
@@ -252,7 +253,7 @@ def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningSco
         "summary": "one short sentence",
         "operations": [
             {
-                "type": "merge|rename|move|split|update|create|alias",
+                "type": "merge|rename|move|split|update|create|alias|delete",
                 "source_page_key": "uuid optional but preferred for existing pages",
                 "target_page_key": "uuid optional but preferred for existing pages",
                 "source_path": "/wiki/example.md",
@@ -262,8 +263,15 @@ def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningSco
         ],
     }
     lines = [
+        WIKI_GUIDE_TEXT.rstrip(),
+        "",
+        "---",
+        "",
         f"Streamline the wiki `{target.knowledge_base}`.",
         f"Scope type: {scope.scope_type}",
+        "",
+        "The guide above is the authoritative wiki construction standard. Streamline operations must move the wiki CLOSER to the guide — enforce the concepts/ + entities/ backbone, add missing cross-references, add footnote citations where claims lack them, merge duplicate pages with overlapping coverage, rename or move pages to the canonical location the guide prescribes, and delete pages that are fully subsumed by a canonical page.",
+        "",
         "Return ONLY JSON matching this general schema:",
         json.dumps(schema, indent=2),
         "",

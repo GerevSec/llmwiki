@@ -22,6 +22,7 @@ from services.compile_tools import (
 from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
 from services.openrouter_client import post_openrouter_chat_completion
+from services.wiki_guide import WIKI_GUIDE_TEXT
 from services.wiki_releases import create_draft_release, get_release_pages, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -199,29 +200,29 @@ def filter_pending_sources(
 
 def build_compile_prompt(knowledge_base: str, sources: list[PendingSource], extra_prompt: str = "") -> str:
     lines = [
+        WIKI_GUIDE_TEXT.rstrip(),
+        "",
+        "---",
+        "",
         f"Use the LLM Wiki toolset to update the knowledge base `{knowledge_base}`.",
         "Only process the listed source documents because they are new or changed since the last successful automated compile.",
         "",
+        "The guide above is the authoritative wiki construction standard. Every rule applies to this run — the concepts/ + entities/ backbone, mandatory footnote citations for every factual claim, mandatory visual elements (at least one per page: mermaid diagram, markdown table, or SVG asset), mandatory cross-references between related pages, and the overview/log update discipline.",
+        "",
         "Required workflow:",
-        "1. Start by calling `guide`.",
+        "1. Call `guide` once to reconfirm the standard and see the current KB stats.",
         "2. Read each listed source document.",
-        "3. Update or create wiki pages under `/wiki/` as needed.",
-        "4. Update `/wiki/overview.md`.",
-        "5. Append one ingest entry to `/wiki/log.md` noting this was an automated periodic compile.",
+        "3. Create or update wiki pages following the guide: concept pages under `/wiki/concepts/`, entity pages under `/wiki/entities/`. Every page needs at least one visual element, footnote citations for every factual claim, and cross-references to related pages.",
+        "4. Update `/wiki/overview.md` (hub page — source count, key findings, recent updates).",
+        "5. Append one ingest entry to `/wiki/log.md` noting this was an automated periodic compile and listing the pages touched.",
         "6. Do not reprocess unrelated sources unless required for consistency.",
         "7. Finish with a section titled `AUTOMATION SUMMARY` containing 3-6 bullets.",
         "8. If you run out of budget, prefer partially-updated wiki pages plus a clear log entry over silently skipping changed sources.",
         "",
-        "Internal guidance:",
-        DEFAULT_COMPILE_INSTRUCTIONS.strip(),
-        "",
-        "Structure guidance:",
-        "- Keep the wiki organized around durable subject-matter categories instead of ad-hoc one-off folders.",
-        "- Reuse existing category structure when it is coherent; improve it only when there is a clear structural gain.",
-        "- Prefer a shallow tree: `/wiki/overview.md`, `/wiki/log.md`, and one folder per domain such as `/wiki/architecture/overview.md`, `/wiki/business/pricing.md`, `/wiki/team/members.md`.",
-        "- When creating a leaf page, always pass a full file path that ends in `.md` (e.g. `/wiki/team/members.md`). Never pass `/wiki/team.md` as a directory with a separate filename — that produces nested `/wiki/team.md/members.md` paths which the UI cannot navigate.",
-        "- Avoid one-entry wrapper directories. If a domain only has one page, put it directly under `/wiki/<domain>.md`.",
-        "- If a source belongs in an existing section, update that section rather than creating a parallel structure.",
+        "Path rules (STRICT):",
+        "- When creating a new page, always pass a full file path ending in `.md` (e.g. `/wiki/entities/alon-gamzu.md`, `/wiki/concepts/token-economics.md`).",
+        "- Never pass `/wiki/team.md` as a parent for a separate filename — that produces a `/wiki/team.md/members.md` nested path which the UI cannot navigate.",
+        "- Use real subdirectories (`/wiki/entities/`, `/wiki/concepts/`), not `.md`-suffixed pseudo-folders.",
         "",
         "Changed sources:",
     ]
