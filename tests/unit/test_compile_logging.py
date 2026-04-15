@@ -258,9 +258,7 @@ class TestWikiStreamliningImport:
         ]
 
         with pytest.raises(RuntimeError) as excinfo:
-            asyncio.get_event_loop().run_until_complete(
-                apply_streamlining_operations(StubConn(), target, "00000000-0000-0000-0000-000000000002", operations)
-            ) if False else asyncio.new_event_loop().run_until_complete(
+            asyncio.new_event_loop().run_until_complete(
                 apply_streamlining_operations(StubConn(), target, "00000000-0000-0000-0000-000000000002", operations)
             )
 

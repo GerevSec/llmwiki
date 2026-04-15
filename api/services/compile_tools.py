@@ -314,15 +314,10 @@ async def tool_write(
         clean_path = path or "/"
         if not clean_path.startswith("/"):
             clean_path = "/" + clean_path
-        tail = clean_path.rsplit("/", 1)[-1] if "/" in clean_path else clean_path
-        path_is_full_file = (
-            not clean_path.endswith("/")
-            and tail.lower().endswith((".md", ".txt"))
-        )
+        tail = clean_path.rsplit("/", 1)[-1]
+        path_is_full_file = not clean_path.endswith("/") and tail.lower().endswith((".md", ".txt"))
         if path_is_full_file:
             dir_path = clean_path.rsplit("/", 1)[0] + "/"
-            if not dir_path.startswith("/"):
-                dir_path = "/" + dir_path
             filename = tail
         else:
             dir_path = clean_path if clean_path.endswith("/") else clean_path + "/"
