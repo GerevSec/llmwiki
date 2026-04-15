@@ -432,6 +432,54 @@ async def repair_release_internal_links(conn: asyncpg.Connection, knowledge_base
             )
 
 
+_WIKI_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((/wiki/[^)\s]+)\)")
+
+
+async def strip_broken_release_links(conn: asyncpg.Connection, knowledge_base_id: str, release_id: str) -> None:
+    """Second-pass repair: after repair_release_internal_links did its best
+    to rewrite broken internal links to nearby valid targets, any remaining
+    `[text](/wiki/broken-target.md)` links get reduced to plain `text`. This
+    lets a compile or streamline release publish cleanly instead of failing
+    the whole run over a handful of stale cross-references — the content is
+    still readable, just without a clickable link for the missing target."""
+    pages = await get_release_pages(conn, release_id)
+    alias_rows = await conn.fetch(
+        "SELECT regexp_replace(alias_path || alias_filename, '/+', '/', 'g') AS full_path "
+        "FROM wiki_path_aliases WHERE release_id = $1::uuid AND knowledge_base_id = $2::uuid "
+        "AND (expires_at IS NULL OR expires_at > now())",
+        release_id,
+        knowledge_base_id,
+    )
+    alias_paths = {row["full_path"] for row in alias_rows}
+    known_paths = {page.full_path for page in pages} | alias_paths
+
+    def _strip(page: ReleasePage, content: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            text = match.group(1)
+            href = match.group(2)
+            resolved = _resolve_internal_link(page, href)
+            if resolved and (resolved in known_paths or resolved.rstrip("/") in known_paths):
+                return match.group(0)
+            return text
+
+        return _WIKI_MD_LINK_RE.sub(replace, content)
+
+    for page in pages:
+        stripped = _strip(page, page.content or "")
+        if stripped != (page.content or ""):
+            await upsert_release_page(
+                conn,
+                release_id,
+                path=page.path,
+                filename=page.filename,
+                title=page.title,
+                content=stripped,
+                tags=page.tags,
+                sort_order=page.sort_order,
+                page_key=page.page_key,
+            )
+
+
 async def ensure_initial_wiki_release(
     conn: asyncpg.Connection,
     knowledge_base_id: str,
@@ -1021,6 +1069,7 @@ async def publish_release(
             raise RuntimeError("Draft release is stale relative to the current published wiki")
 
         await repair_release_internal_links(conn, knowledge_base_id, release_id)
+        await strip_broken_release_links(conn, knowledge_base_id, release_id)
         validation = await validate_release(conn, knowledge_base_id, release_id, mode=mode)
         if not validation.ok:
             raise RuntimeError("; ".join(validation.errors))

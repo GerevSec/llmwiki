@@ -138,6 +138,39 @@ class TestMergeReleasePagesCoherence:
 # ─── US-104: path normalization guards ────────────────────────────────────
 
 
+class TestStripBrokenReleaseLinks:
+    """Regression: publish_release used to fail the whole run when validate_release
+    found any broken internal wiki links. strip_broken_release_links now reduces
+    `[text](/wiki/broken.md)` to plain `text` before validation so a handful of
+    stale cross-references can't nuke 17 pages of otherwise-good content."""
+
+    def test_broken_wiki_link_is_stripped_to_plain_text(self):
+        import re
+
+        from services.wiki_releases import _WIKI_MD_LINK_RE
+
+        content = "See [Life Agent](/wiki/concepts/life-agent.md) and [Missing Page](/wiki/concepts/missing.md)."
+        known_paths = {"/wiki/concepts/life-agent.md"}
+
+        def replace(match: re.Match[str]) -> str:
+            text = match.group(1)
+            href = match.group(2)
+            return match.group(0) if href in known_paths else text
+
+        stripped = _WIKI_MD_LINK_RE.sub(replace, content)
+        assert "(/wiki/concepts/missing.md)" not in stripped
+        assert "(/wiki/concepts/life-agent.md)" in stripped
+        assert "Missing Page" in stripped
+        assert "Life Agent" in stripped
+
+    def test_regex_only_matches_wiki_paths(self):
+        from services.wiki_releases import _WIKI_MD_LINK_RE
+
+        content = "[Google](https://google.com) and [Relative](./foo.md)"
+        matches = _WIKI_MD_LINK_RE.findall(content)
+        assert not matches, f"regex should not match external or relative links, got {matches}"
+
+
 class TestFlatWikiPathNormalization:
     """tool_write create, streamlining apply, and rename ops must never leave
     pages at /wiki/<something>.md/<leaf>.md. Any such attempt is normalized to
