@@ -24,6 +24,7 @@ from services.wiki_releases import (
     add_alias,
     clear_dirty_scope,
     create_draft_release,
+    delete_release_page,
     get_release_page_by_full_path,
     get_release_pages,
     merge_release_pages,
@@ -502,6 +503,23 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
                 reason=operation.get("reason") or "alias",
             )
             changed_paths.append(source_path)
+        elif op_type == "delete":
+            ref_path = source_path or target_path
+            if not ref_path:
+                raise RuntimeError("delete operation requires source_path or target_path")
+            page = await resolve_page_reference(
+                conn,
+                draft_release_id,
+                reference=ref_path,
+                page_key=source_page_key or target_page_key,
+            )
+            if not page:
+                raise RuntimeError(f"delete page not found: {ref_path}")
+            protected_filenames = {"overview.md", "log.md"}
+            if page.path == "/wiki/" and page.filename in protected_filenames:
+                raise RuntimeError(f"refusing to delete protected wiki page {page.path}{page.filename}")
+            await delete_release_page(conn, draft_release_id, page.page_key)
+            changed_paths.append(f"{page.path}{page.filename}")
         else:
             raise RuntimeError(f"Unsupported streamlining operation type: {op_type}")
     return changed_paths

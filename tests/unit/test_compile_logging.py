@@ -173,6 +173,53 @@ class TestWikiStreamliningImport:
             "(missing import caused NameError in prod streamlining runs)"
         )
 
+    def test_apply_streamlining_delete_is_supported(self):
+        """Regression: delete ops were rejected with
+        'Unsupported streamlining operation type: delete', which caused one
+        bes-wiki streamline run to fail. This asserts the branch exists and
+        raises a clean 'page not found' against a stub conn (proving no
+        'Unsupported' error)."""
+        import asyncio
+
+        from services.wiki_streamlining import StreamliningTarget, apply_streamlining_operations
+
+        target = StreamliningTarget(
+            knowledge_base="unit-test-kb",
+            knowledge_base_id="00000000-0000-0000-0000-000000000000",
+            provider_api_key="",
+            provider="openrouter",
+            model="test",
+            prompt="",
+            actor_user_id="00000000-0000-0000-0000-000000000001",
+            interval_minutes=1440,
+            active_release_id="00000000-0000-0000-0000-000000000002",
+        )
+
+        class StubConn:
+            async def fetch(self, *_, **__):
+                return []
+            async def fetchrow(self, *_, **__):
+                return None
+            async def fetchval(self, *_, **__):
+                return None
+            async def execute(self, *_, **__):
+                return "OK"
+
+        operations = [
+            {
+                "type": "delete",
+                "source_path": "/wiki/something-to-remove.md",
+            }
+        ]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            asyncio.new_event_loop().run_until_complete(
+                apply_streamlining_operations(StubConn(), target, "00000000-0000-0000-0000-000000000002", operations)
+            )
+        message = str(excinfo.value)
+        assert "Unsupported" not in message
+        assert "delete" in message.lower()
+
     def test_apply_streamlining_rename_raises_clear_error_not_nameerror(self):
         """apply_streamlining_operations against a stubbed conn must raise a RuntimeError
         about a missing source page (NOT a NameError), proving the import fix holds."""
