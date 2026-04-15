@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,7 @@ import asyncpg
 import httpx
 
 from config import settings
+from services.compile_logging import log_streamline, preview
 from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
 from services.openrouter_client import post_openrouter_chat_completion
@@ -28,6 +30,7 @@ from services.wiki_releases import (
     prune_old_releases,
     publish_release,
     record_dirty_scope,
+    rename_release_page,
     split_release_page,
     upsert_release_page,
     validate_release,
@@ -276,6 +279,14 @@ def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningSco
 
 async def _invoke_streamlining_provider(prompt: str, target: StreamliningTarget) -> dict[str, Any]:
     timeout = httpx.Timeout(settings.LLMWIKI_COMPILE_TIMEOUT_SECONDS)
+    log_streamline(
+        "provider_request",
+        provider=target.provider,
+        kb=target.knowledge_base,
+        model=target.model,
+        prompt_chars=len(prompt),
+    )
+    request_start = time.monotonic()
     if target.provider == "anthropic":
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -294,6 +305,18 @@ async def _invoke_streamlining_provider(prompt: str, target: StreamliningTarget)
             response.raise_for_status()
             data = response.json()
             text = "\n".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
+            usage = data.get("usage") or {}
+            log_streamline(
+                "provider_response",
+                provider="anthropic",
+                kb=target.knowledge_base,
+                request_id=data.get("id"),
+                stop_reason=data.get("stop_reason"),
+                elapsed_s=round(time.monotonic() - request_start, 2),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                text_preview=preview(text, 240),
+            )
             return {"request_id": data.get("id", ""), "text": text}
     async with httpx.AsyncClient(timeout=timeout) as client:
         data = await post_openrouter_chat_completion(
@@ -307,7 +330,21 @@ async def _invoke_streamlining_provider(prompt: str, target: StreamliningTarget)
             },
         )
         message = data["choices"][0].get("message", {})
-        return {"request_id": data.get("id", ""), "text": message.get("content") or ""}
+        text = message.get("content") or ""
+        usage = data.get("usage") or {}
+        log_streamline(
+            "provider_response",
+            provider="openrouter",
+            kb=target.knowledge_base,
+            request_id=data.get("id"),
+            finish_reason=data["choices"][0].get("finish_reason"),
+            elapsed_s=round(time.monotonic() - request_start, 2),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+            text_preview=preview(text, 240),
+        )
+        return {"request_id": data.get("id", ""), "text": text}
 
 
 async def _record_streamlining_run(
@@ -471,10 +508,35 @@ async def apply_streamlining_operations(conn: asyncpg.Connection, target: Stream
 
 
 async def run_streamlining_target(pool: asyncpg.Pool, target: StreamliningTarget, *, force_full: bool = False, manual: bool = False) -> dict[str, Any]:
+    run_wall_start = time.monotonic()
+    log_streamline(
+        "run_start",
+        kb=target.knowledge_base,
+        kb_id=target.knowledge_base_id,
+        provider=target.provider,
+        model=target.model,
+        manual=manual,
+        force_full=force_full,
+        active_release_id=target.active_release_id,
+    )
     async with pool.acquire() as conn:
         scope = await determine_streamlining_scope(conn, target.knowledge_base_id, target.active_release_id, force_full=force_full)
+        log_streamline(
+            "scope_determined",
+            kb=target.knowledge_base,
+            scope_type=scope.scope_type,
+            pages_in_scope=len(scope.pages),
+            dirty_paths=len(scope.dirty_paths),
+        )
         if not scope.pages:
             await _update_streamlining_schedule(conn, target, status="skipped")
+            log_streamline(
+                "run_skipped",
+                kb=target.knowledge_base,
+                reason="empty_scope",
+                scope_type=scope.scope_type,
+                elapsed_s=round(time.monotonic() - run_wall_start, 2),
+            )
             return {"knowledge_base": target.knowledge_base, "status": "skipped", "scope_type": scope.scope_type}
         run_id = await _record_streamlining_run(conn, target, scope, status="running")
         draft_release_id, _ = await create_draft_release(conn, target.knowledge_base_id, created_by="streamlining", created_by_run_id=run_id)
@@ -486,13 +548,35 @@ async def run_streamlining_target(pool: asyncpg.Pool, target: StreamliningTarget
         async with pool.acquire() as conn:
             await _finish_streamlining_run(conn, run_id, status="failed", error_message=str(exc))
             await _update_streamlining_schedule(conn, target, status="failed", error_message=str(exc))
+        log_streamline(
+            "run_failed",
+            kb=target.knowledge_base,
+            run_id=run_id,
+            stage="provider_or_parse",
+            error=preview(str(exc), 320),
+            elapsed_s=round(time.monotonic() - run_wall_start, 2),
+        )
         raise
 
     operations = list(payload.get("operations") or [])
+    log_streamline(
+        "operations_parsed",
+        kb=target.knowledge_base,
+        run_id=run_id,
+        operation_count=len(operations),
+        summary=preview(payload.get("summary"), 160),
+    )
     if not operations:
         async with pool.acquire() as conn:
             await _finish_streamlining_run(conn, run_id, status="skipped", response_excerpt=(payload.get("summary") or "No changes"))
             await _update_streamlining_schedule(conn, target, status="skipped")
+        log_streamline(
+            "run_skipped",
+            kb=target.knowledge_base,
+            run_id=run_id,
+            reason="no_operations",
+            elapsed_s=round(time.monotonic() - run_wall_start, 2),
+        )
         return {"knowledge_base": target.knowledge_base, "status": "skipped", "scope_type": scope.scope_type, "request_id": response["request_id"]}
 
     async with pool.acquire() as conn:
@@ -524,7 +608,24 @@ async def run_streamlining_target(pool: asyncpg.Pool, target: StreamliningTarget
         except Exception as exc:
             await _finish_streamlining_run(conn, run_id, status="failed", error_message=str(exc))
             await _update_streamlining_schedule(conn, target, status="failed", error_message=str(exc))
+            log_streamline(
+                "run_failed",
+                kb=target.knowledge_base,
+                run_id=run_id,
+                stage="apply_or_publish",
+                error=preview(str(exc), 320),
+                elapsed_s=round(time.monotonic() - run_wall_start, 2),
+            )
             raise
+    log_streamline(
+        "run_success",
+        kb=target.knowledge_base,
+        run_id=run_id,
+        scope_type=scope.scope_type,
+        operation_count=len(operations),
+        changed_paths=len(changed_paths),
+        elapsed_s=round(time.monotonic() - run_wall_start, 2),
+    )
     return {
         "knowledge_base": target.knowledge_base,
         "status": "succeeded",

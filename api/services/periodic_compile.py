@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -11,6 +12,7 @@ import asyncpg
 import httpx
 
 from config import settings
+from services.compile_logging import log_compile, preview
 from services.compile_tools import (
     ToolContext,
     execute_tool,
@@ -521,6 +523,12 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
             f"compile:{kb['id']}",
         )
         if not acquired:
+            log_compile(
+                "run_lock_busy",
+                kb=kb["slug"],
+                kb_id=kb["id"],
+                mode="recompile" if target.reset_wiki else "compile",
+            )
             raise RuntimeError(f"Compile already running for knowledge base '{kb['slug']}'")
         try:
             _, pending = await get_compile_context(
@@ -529,6 +537,7 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 target.max_sources,
                 ignore_checkpoints=target.force_all_sources,
             )
+            run_mode = "recompile" if target.reset_wiki else "compile"
             if not pending:
                 run_id = await _record_run(
                     conn,
@@ -539,6 +548,16 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                     provider=target.provider,
                     sources=[],
                     response_excerpt="No new or changed ready sources.",
+                )
+                log_compile(
+                    "run_skipped",
+                    kb=kb["slug"],
+                    kb_id=kb["id"],
+                    mode=run_mode,
+                    provider=target.provider,
+                    model=target.model,
+                    reason="no_pending_sources",
+                    run_id=run_id,
                 )
                 await _update_kb_settings_run_state(conn, kb["id"], "skipped", None, advance_schedule, target.interval_minutes)
                 return {"knowledge_base": kb["slug"], "status": "skipped", "source_count": 0, "request_id": run_id}
@@ -551,6 +570,23 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 model=target.model,
                 provider=target.provider,
                 sources=[_serialize_pending_source(source) for source in pending],
+            )
+            run_wall_start = time.monotonic()
+            log_compile(
+                "run_start",
+                kb=kb["slug"],
+                kb_id=kb["id"],
+                mode=run_mode,
+                provider=target.provider,
+                model=target.model,
+                source_count=len(pending),
+                max_sources=target.max_sources,
+                max_tool_rounds=target.max_tool_rounds,
+                max_tokens=target.max_tokens,
+                run_id=run_id,
+                advance_schedule=advance_schedule,
+                force_all_sources=target.force_all_sources,
+                reset_wiki=target.reset_wiki,
             )
             try:
                 draft_release_id, _base_release_id = await create_draft_release(
@@ -570,18 +606,40 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                         prompt_parts.append(_build_recompile_batch_instructions(batch_index, len(source_batches)))
                     merged_prompt = "\n\n".join(part for part in prompt_parts if part)
                     prompt = build_compile_prompt(kb["slug"], source_batch, merged_prompt)
-                    batch_responses.append(
-                        await _invoke_provider(
-                            prompt,
-                            replace(
-                                target,
-                                wiki_release_id=draft_release_id,
-                                knowledge_base_id=kb["id"],
-                                run_id=run_id,
-                                run_started_at=run_started_at,
-                                pending_source_paths=tuple(source.full_path for source in source_batch),
-                            ),
-                        )
+                    batch_wall_start = time.monotonic()
+                    log_compile(
+                        "batch_start",
+                        kb=kb["slug"],
+                        mode=run_mode,
+                        run_id=run_id,
+                        batch=batch_index,
+                        batch_count=len(source_batches),
+                        batch_sources=[source.full_path for source in source_batch],
+                        prompt_chars=len(prompt),
+                    )
+                    batch_response = await _invoke_provider(
+                        prompt,
+                        replace(
+                            target,
+                            wiki_release_id=draft_release_id,
+                            knowledge_base_id=kb["id"],
+                            run_id=run_id,
+                            run_started_at=run_started_at,
+                            pending_source_paths=tuple(source.full_path for source in source_batch),
+                        ),
+                    )
+                    batch_responses.append(batch_response)
+                    log_compile(
+                        "batch_end",
+                        kb=kb["slug"],
+                        mode=run_mode,
+                        run_id=run_id,
+                        batch=batch_index,
+                        batch_count=len(source_batches),
+                        stop_reason=batch_response.get("stop_reason"),
+                        request_id=batch_response.get("request_id"),
+                        elapsed_s=round(time.monotonic() - batch_wall_start, 2),
+                        excerpt=preview(batch_response.get("text_excerpt", "")),
                     )
 
                 quality_report = await publish_release(
@@ -602,6 +660,17 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
                 for source in pending:
                     await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")
+                log_compile(
+                    "run_success",
+                    kb=kb["slug"],
+                    mode=run_mode,
+                    run_id=run_id,
+                    source_count=len(pending),
+                    batch_count=len(source_batches),
+                    stop_reason=response.get("stop_reason"),
+                    request_id=response.get("request_id"),
+                    elapsed_s=round(time.monotonic() - run_wall_start, 2),
+                )
                 return {
                     "knowledge_base": kb["slug"],
                     "status": "succeeded",
@@ -613,6 +682,14 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
             except Exception as exc:
                 await _finish_run(conn, run_id, "failed", error_message=str(exc))
                 await _update_kb_settings_run_state(conn, kb["id"], "failed", str(exc), advance_schedule, target.interval_minutes)
+                log_compile(
+                    "run_failed",
+                    kb=kb["slug"],
+                    mode=run_mode,
+                    run_id=run_id,
+                    elapsed_s=round(time.monotonic() - run_wall_start, 2),
+                    error=preview(str(exc), 320),
+                )
                 raise
         finally:
             await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", f"compile:{kb['id']}")
@@ -663,14 +740,33 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
     seen_tool_signatures: set[str] = set()
     seen_source_reads: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _ in range(target.max_tool_rounds):
+        for round_index in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
             if abort_reason:
+                log_compile(
+                    "provider_abort",
+                    provider="anthropic",
+                    kb=target.knowledge_base,
+                    run_id=target.run_id,
+                    round=round_index,
+                    reason=telemetry.get("abort_reason") or "abort",
+                    message=preview(abort_reason),
+                )
                 if target.run_id:
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:
                         await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 raise RuntimeError(abort_reason)
+            request_start = time.monotonic()
+            log_compile(
+                "provider_request",
+                provider="anthropic",
+                kb=target.knowledge_base,
+                run_id=target.run_id,
+                round=round_index,
+                model=target.model,
+                message_count=len(messages),
+            )
             response = await client.post(
                 ANTHROPIC_API_URL,
                 headers=headers,
@@ -688,6 +784,21 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                 telemetry["provider_request_ids"].append(data["id"])
             stop_reason = data.get("stop_reason")
             content_blocks = data.get("content", [])
+            usage = data.get("usage") or {}
+            log_compile(
+                "provider_response",
+                provider="anthropic",
+                kb=target.knowledge_base,
+                run_id=target.run_id,
+                round=round_index,
+                request_id=data.get("id"),
+                stop_reason=stop_reason,
+                elapsed_s=round(time.monotonic() - request_start, 2),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cache_read=usage.get("cache_read_input_tokens"),
+                cache_create=usage.get("cache_creation_input_tokens"),
+            )
             if stop_reason == "pause_turn":
                 telemetry["continuations"] += 1
                 if target.run_id:
@@ -714,6 +825,7 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                         if signature not in seen_tool_signatures:
                             seen_tool_signatures.add(signature)
                             telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
+                        tool_start = time.monotonic()
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -724,8 +836,21 @@ async def _invoke_anthropic(prompt: str, target: CompileTarget) -> dict[str, Any
                             tool_name,
                             tool_input,
                         )
-                        if _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads):
+                        made_progress = _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads)
+                        if made_progress:
                             progress_made = True
+                        log_compile(
+                            "tool_call",
+                            provider="anthropic",
+                            kb=target.knowledge_base,
+                            run_id=target.run_id,
+                            round=round_index,
+                            tool=tool_name,
+                            args=preview(tool_input, 160),
+                            result=preview(result_text, 200),
+                            progress=made_progress,
+                            elapsed_s=round(time.monotonic() - tool_start, 2),
+                        )
                         tool_results.append(
                             {
                                 "type": "tool_result",
@@ -763,14 +888,33 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
     seen_tool_signatures: set[str] = set()
     seen_source_reads: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _ in range(target.max_tool_rounds):
+        for round_index in range(target.max_tool_rounds):
             abort_reason = _compile_abort_reason(target, telemetry)
             if abort_reason:
+                log_compile(
+                    "provider_abort",
+                    provider="openrouter",
+                    kb=target.knowledge_base,
+                    run_id=target.run_id,
+                    round=round_index,
+                    reason=telemetry.get("abort_reason") or "abort",
+                    message=preview(abort_reason),
+                )
                 if target.run_id:
                     tool_pool = await _get_pool_for_tools()
                     async with tool_pool.acquire() as telemetry_conn:
                         await _update_run_telemetry(telemetry_conn, target.run_id, telemetry)
                 raise RuntimeError(abort_reason)
+            request_start = time.monotonic()
+            log_compile(
+                "provider_request",
+                provider="openrouter",
+                kb=target.knowledge_base,
+                run_id=target.run_id,
+                round=round_index,
+                model=target.model,
+                message_count=len(messages),
+            )
             data = await post_openrouter_chat_completion(
                 client,
                 api_key=target.provider_api_key,
@@ -790,6 +934,22 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
             message = choice.get("message", {})
             tool_calls = message.get("tool_calls") or []
             finish_reason = choice.get("finish_reason")
+            usage = data.get("usage") or {}
+            log_compile(
+                "provider_response",
+                provider="openrouter",
+                kb=target.knowledge_base,
+                run_id=target.run_id,
+                round=round_index,
+                request_id=data.get("id"),
+                finish_reason=finish_reason,
+                tool_calls=len(tool_calls),
+                elapsed_s=round(time.monotonic() - request_start, 2),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                content_preview=preview(_openrouter_message_text(message), 200),
+            )
             if tool_calls:
                 messages.append(
                     {
@@ -811,6 +971,7 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                         if signature not in seen_tool_signatures:
                             seen_tool_signatures.add(signature)
                             telemetry["distinct_tool_signatures"] = len(seen_tool_signatures)
+                        tool_start = time.monotonic()
                         result_text = await execute_tool(
                             ToolContext(
                                 pool=tool_conn,
@@ -821,8 +982,21 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                             tool_name,
                             tool_input,
                         )
-                        if _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads):
+                        made_progress = _compile_tool_made_meaningful_progress(target, tool_name, tool_input, result_text, seen_source_reads)
+                        if made_progress:
                             progress_made = True
+                        log_compile(
+                            "tool_call",
+                            provider="openrouter",
+                            kb=target.knowledge_base,
+                            run_id=target.run_id,
+                            round=round_index,
+                            tool=tool_name,
+                            args=preview(tool_input, 160),
+                            result=preview(result_text, 200),
+                            progress=made_progress,
+                            elapsed_s=round(time.monotonic() - tool_start, 2),
+                        )
                         messages.append(
                             {
                                 "role": "tool",
