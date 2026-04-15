@@ -966,7 +966,38 @@ async def _invoke_openrouter(prompt: str, target: CompileTarget) -> dict[str, An
                 async with tool_pool.acquire() as tool_conn:
                     for tool_call in tool_calls:
                         tool_name = tool_call["function"]["name"]
-                        tool_input = loads_lenient_json(tool_call["function"]["arguments"] or "{}")
+                        raw_args = tool_call["function"]["arguments"] or "{}"
+                        try:
+                            tool_input = loads_lenient_json(raw_args)
+                        except Exception as parse_exc:
+                            tool_input = {}
+                            result_text = (
+                                "Error: tool_call arguments were not valid JSON "
+                                f"({parse_exc}). Retry with a smaller `content` value — "
+                                "the response likely hit the max_tokens cap and truncated mid-string. "
+                                "Split a large page into multiple smaller writes."
+                            )
+                            telemetry["tool_calls"] += 1
+                            telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
+                            log_compile(
+                                "tool_call_parse_error",
+                                provider="openrouter",
+                                kb=target.knowledge_base,
+                                run_id=target.run_id,
+                                round=round_index,
+                                tool=tool_name,
+                                raw_args_preview=preview(raw_args, 160),
+                                error=str(parse_exc)[:200],
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call["id"],
+                                    "name": tool_name,
+                                    "content": result_text,
+                                }
+                            )
+                            continue
                         telemetry["tool_calls"] += 1
                         telemetry["tool_calls_by_name"][tool_name] = telemetry["tool_calls_by_name"].get(tool_name, 0) + 1
                         signature = _tool_signature(tool_name, tool_input)
