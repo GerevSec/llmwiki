@@ -51,6 +51,19 @@ def test_kb_guidelines_router_exposes_batch_create():
     assert ("/v1/knowledge-bases/{kb_id}/guidelines/batch", frozenset({"POST"})) in paths_methods
 
 
+def test_guideline_batch_create_preserves_multiline_bodies():
+    """Each guideline can be free-form multi-line markdown including
+    sub-bullets — internal whitespace must NOT be stripped, only outer."""
+    from routes.kb_guidelines import GuidelineBatchCreate
+
+    multiline = "- A\n- B\n  - B.1\n  - B.2\n- C"
+    payload = GuidelineBatchCreate(bodies=["  " + multiline + "  ", "single line"])
+    assert payload.bodies[0].strip() == multiline, "outer whitespace OK to strip; internal newlines must survive"
+    # Behavior contract: handler trims outer whitespace, drops empty entries,
+    # but preserves multi-line content. Smoke-asserts the model accepts both.
+    assert "\n  - B.1\n" in payload.bodies[0]
+
+
 def test_no_route_under_api_prefix():
     """Next.js reserves `/api/*` for its own internal routes. Backend routers
     must not collide — same-origin browser fetches to `/api/...` get routed to

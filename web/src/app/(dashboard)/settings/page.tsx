@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { ArrowLeft, Check, Copy, Loader2, Trash2 } from 'lucide-react'
+import { ArrowLeft, Check, Copy, Loader2, Plus, Trash2, X } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
@@ -236,7 +236,7 @@ function ScheduleCard({
   const isAdmin = ADMIN_ROLES.has(kb.role)
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [inviteRole, setInviteRole] = React.useState('viewer')
-  const [newGuidelineBody, setNewGuidelineBody] = React.useState('')
+  const [drafts, setDrafts] = React.useState<string[]>([''])
   const [addingGuideline, setAddingGuideline] = React.useState(false)
   const [editingGuidelineId, setEditingGuidelineId] = React.useState<string | null>(null)
   const [editingBody, setEditingBody] = React.useState('')
@@ -641,34 +641,64 @@ function ScheduleCard({
             )
           ))}
           <div className="space-y-2 rounded-md border border-dashed border-border p-3">
-            <textarea
-              value={newGuidelineBody}
-              onChange={(e) => setNewGuidelineBody(e.target.value)}
-              placeholder={`Add one or more guidelines (one per line)\n\nDo not include people as entities\nUse this structure: …\nFocus on …`}
-              rows={5}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed"
-            />
-            {(() => {
-              const parsed = newGuidelineBody.split('\n').map((l) => l.trim()).filter(Boolean)
-              const count = parsed.length
-              const label = count <= 1 ? 'Add guideline' : `Add ${count} guidelines`
-              const helper = count > 1
-                ? `${count} non-empty lines detected — each becomes a separate guideline.`
-                : 'One guideline per line. Each line becomes a separate standing rule.'
-              return (
-                <>
-                  <p className="text-xs text-muted-foreground">{helper}</p>
+            <p className="text-xs text-muted-foreground">
+              Each card is one guideline. Use the textarea like a markdown editor — bullet lists, sub-bullets, line breaks all preserved.
+            </p>
+            {drafts.map((draft, idx) => (
+              <div key={idx} className="flex items-start gap-2">
+                <textarea
+                  value={draft}
+                  onChange={(e) => {
+                    const next = [...drafts]
+                    next[idx] = e.target.value
+                    setDrafts(next)
+                  }}
+                  placeholder={
+                    idx === 0
+                      ? 'Write a guideline…\n\n- supports bullets\n- and sub-bullets:\n  - like this'
+                      : 'Another guideline'
+                  }
+                  rows={3}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed"
+                />
+                {drafts.length > 1 && (
                   <button
+                    type="button"
+                    onClick={() => setDrafts(drafts.filter((_, i) => i !== idx))}
+                    className="mt-1 rounded p-1 text-muted-foreground hover:bg-accent cursor-pointer"
+                    title="Remove this draft"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+            {(() => {
+              const cleaned = drafts.map((d) => d.trim()).filter(Boolean)
+              const count = cleaned.length
+              const label = count <= 1 ? 'Add guideline' : `Add ${count} guidelines`
+              return (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setDrafts([...drafts, ''])}
+                    className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
+                  >
+                    <Plus className="size-3.5" />
+                    Add another
+                  </button>
+                  <button
+                    type="button"
                     onClick={async () => {
-                      if (parsed.length === 0) return
+                      if (cleaned.length === 0) return
                       setAddingGuideline(true)
                       try {
-                        if (parsed.length === 1) {
-                          await onAddGuideline(kb.id, parsed[0])
+                        if (cleaned.length === 1) {
+                          await onAddGuideline(kb.id, cleaned[0])
                         } else {
-                          await onAddGuidelines(kb.id, parsed)
+                          await onAddGuidelines(kb.id, cleaned)
                         }
-                        setNewGuidelineBody('')
+                        setDrafts([''])
                       } finally {
                         setAddingGuideline(false)
                       }
@@ -679,7 +709,7 @@ function ScheduleCard({
                     {addingGuideline ? <Loader2 className="size-3.5 animate-spin" /> : null}
                     {label}
                   </button>
-                </>
+                </div>
               )
             })()}
           </div>
