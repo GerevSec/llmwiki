@@ -436,12 +436,8 @@ _WIKI_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((/wiki/[^)\s]+)\)")
 
 
 async def strip_broken_release_links(conn: asyncpg.Connection, knowledge_base_id: str, release_id: str) -> None:
-    """Second-pass repair: after repair_release_internal_links did its best
-    to rewrite broken internal links to nearby valid targets, any remaining
-    `[text](/wiki/broken-target.md)` links get reduced to plain `text`. This
-    lets a compile or streamline release publish cleanly instead of failing
-    the whole run over a handful of stale cross-references — the content is
-    still readable, just without a clickable link for the missing target."""
+    """Second-pass repair: reduce any remaining `[text](/wiki/broken.md)` links
+    to plain `text` so stale cross-references don't fail the whole publish."""
     pages = await get_release_pages(conn, release_id)
     alias_rows = await conn.fetch(
         "SELECT regexp_replace(alias_path || alias_filename, '/+', '/', 'g') AS full_path "

@@ -1,13 +1,10 @@
 """Shared wiki construction doctrine.
 
-This is the authoritative guide for how LLMs should build and maintain a
-wiki. It is injected into every compile / recompile / streamline run so the
-cheap automated worker sees the same doctrine that the interactive MCP
-`guide` tool returns.
+Injected into every compile / recompile / streamline run so the automated
+worker sees the same doctrine that the interactive MCP `guide` tool returns.
 
-The mcp service has its own copy at mcp/tools/guide.py `GUIDE_TEXT`. The
-two must stay identical — tests/unit/test_wiki_guide.py asserts string
-equality at import time so drift fails loudly in pytest regardless of CI.
+The mcp service mirrors this at mcp/tools/guide.py `GUIDE_TEXT`.
+tests/unit/test_wiki_guide.py asserts string equality — drift fails loudly.
 """
 
 from __future__ import annotations

@@ -47,10 +47,7 @@ async def recompile_knowledge_base_from_scratch_internal(
     slug: str = Query(..., description="Knowledge base slug"),
     x_llmwiki_automation_secret: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Automation-secret-gated recompile-from-scratch. Runs the full compile
-    flow with reset_wiki=True and force_all_sources=True, so the draft
-    release starts empty and every source is re-processed. Used by ops to
-    rebuild a wiki cleanly after doctrine changes."""
+    """Recompile a wiki from scratch (reset_wiki=True, force_all_sources=True)."""
     _check_automation_secret(x_llmwiki_automation_secret)
     pool = request.app.state.pool
     try:
