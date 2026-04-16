@@ -35,15 +35,15 @@ def register(mcp: FastMCP) -> None:
     )
     async def delete(
         ctx: Context,
-        knowledge_base: str,
+        kb_slug: str,
         path: str,
     ) -> str:
         user_id = get_user_id(ctx)
 
         try:
-            kb = await require_kb_role(user_id, knowledge_base, "owner", "admin", "editor")
+            kb = await require_kb_role(user_id, kb_slug, "owner", "admin", "editor")
         except RuntimeError:
-            return f"Knowledge base '{knowledge_base}' not found."
+            return f"Knowledge base '{kb_slug}' not found."
 
         if not path or path in ("*", "**", "**/*"):
             return "Error: refusing to delete everything. Use a more specific path."
@@ -71,7 +71,7 @@ def register(mcp: FastMCP) -> None:
             matched = [doc] if doc else []
 
         if not matched:
-            return f"No documents matching `{path}` found in {knowledge_base}."
+            return f"No documents matching `{path}` found in {kb_slug}."
 
         protected = [d for d in matched if _is_protected(d)]
         deletable = [d for d in matched if not _is_protected(d)]

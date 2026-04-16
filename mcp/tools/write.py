@@ -241,7 +241,7 @@ def register(mcp: FastMCP) -> None:
     )
     async def write(
         ctx: Context,
-        knowledge_base: str,
+        kb_slug: str,
         command: Literal["create", "str_replace", "append"],
         path: str = "/",
         title: str = "",
@@ -254,9 +254,9 @@ def register(mcp: FastMCP) -> None:
         user_id = get_user_id(ctx)
 
         try:
-            kb = await require_kb_role(user_id, knowledge_base, "owner", "admin", "editor")
+            kb = await require_kb_role(user_id, kb_slug, "owner", "admin", "editor")
         except RuntimeError:
-            return f"Knowledge base '{knowledge_base}' not found."
+            return f"Knowledge base '{kb_slug}' not found."
 
         if command == "create":
             return await _create_note(user_id, kb, path, title, content, tags or [], date_str)

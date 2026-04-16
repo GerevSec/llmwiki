@@ -3,7 +3,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from db import scoped_query, scoped_queryrow
+from db import scoped_query
 from .helpers import get_user_id, resolve_kb, deep_link, glob_match, MAX_LIST, MAX_SEARCH
 
 logger = logging.getLogger(__name__)
@@ -25,27 +25,6 @@ def _extract_snippet(content: str, query: str) -> str:
     if end < len(content):
         snippet = snippet + "..."
     return snippet
-
-
-async def _list_all_kbs(user_id: str) -> str:
-    kbs = await scoped_query(
-        user_id,
-        "SELECT name, slug, created_at FROM knowledge_bases ORDER BY created_at DESC",
-    )
-    if not kbs:
-        return "No knowledge bases found. Create one first."
-
-    lines = ["**Knowledge Bases:**\n"]
-    for kb in kbs:
-        doc_count = await scoped_queryrow(
-            user_id,
-            "SELECT count(*) as cnt FROM documents WHERE knowledge_base_id = ("
-            "SELECT id FROM knowledge_bases WHERE slug = $1) AND NOT archived",
-            kb["slug"],
-        )
-        cnt = doc_count["cnt"] if doc_count else 0
-        lines.append(f"  {kb['slug']}/ — {kb['name']} ({cnt} documents)")
-    return "\n".join(lines)
 
 
 async def _list_documents(user_id: str, kb: dict, target: str, tags: list[str] | None) -> str:
@@ -148,18 +127,20 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         name="search",
         description=(
-            "Browse or search the knowledge vault.\n\n"
+            "Browse or search a knowledge base.\n\n"
             "Sources (raw documents) live at `/`. Wiki pages (LLM-compiled) live at `/wiki/`.\n\n"
             "Modes:\n"
             "- list: browse files and folders\n"
             "- search: keyword search across document content (searches chunks for precise results with page numbers)\n\n"
             "Use `path` to scope: `*` for root, `/wiki/**` for wiki only, `*.pdf` for PDFs, etc.\n"
-            "Use `tags` to filter by document tags."
+            "Use `tags` to filter by document tags.\n\n"
+            "BREAKING CHANGE: `kb_slug` is now required. Call `list_knowledge_bases` first to find "
+            "available slugs. Passing an empty string is no longer supported."
         ),
     )
     async def search(
         ctx: Context,
-        knowledge_base: str,
+        kb_slug: str,
         mode: Literal["list", "search"] = "list",
         query: str = "",
         path: str = "*",
@@ -168,12 +149,9 @@ def register(mcp: FastMCP) -> None:
     ) -> str:
         user_id = get_user_id(ctx)
 
-        if not knowledge_base:
-            return await _list_all_kbs(user_id)
-
-        kb = await resolve_kb(user_id, knowledge_base)
+        kb = await resolve_kb(user_id, kb_slug)
         if not kb:
-            return f"Knowledge base '{knowledge_base}' not found."
+            return f"Knowledge base '{kb_slug}' not found. Call `list_knowledge_bases` to see available KBs."
 
         if mode == "list":
             return await _list_documents(user_id, kb, path, tags)

@@ -245,7 +245,7 @@ def register(mcp: FastMCP) -> None:
     )
     async def read(
         ctx: Context,
-        knowledge_base: str,
+        kb_slug: str,
         path: str,
         pages: str = "",
         sections: list[str] | None = None,
@@ -253,9 +253,9 @@ def register(mcp: FastMCP) -> None:
     ) -> str | list:
         user_id = get_user_id(ctx)
 
-        kb = await resolve_kb(user_id, knowledge_base)
+        kb = await resolve_kb(user_id, kb_slug)
         if not kb:
-            return f"Knowledge base '{knowledge_base}' not found."
+            return f"Knowledge base '{kb_slug}' not found."
 
         is_glob = "*" in path or "?" in path
         if is_glob:
@@ -280,7 +280,7 @@ def register(mcp: FastMCP) -> None:
             )
 
         if not doc:
-            return f"Document '{path}' not found in {knowledge_base}."
+            return f"Document '{path}' not found in {kb_slug}."
 
         tags_str = ", ".join(doc["tags"]) if doc["tags"] else "none"
         link = deep_link(kb["slug"], doc["path"], doc["filename"])

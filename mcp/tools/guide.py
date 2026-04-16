@@ -175,7 +175,13 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(
         name="guide",
-        description="Get started with LLM Wiki. Call this to understand how the knowledge vault works and see your available knowledge bases.",
+        description=(
+            "Get started with LLM Wiki. Call this to understand how the knowledge vault works and see your available knowledge bases.\n\n"
+            "Recommended workflow:\n"
+            "1. Call `list_knowledge_bases` to discover available KBs and their slugs.\n"
+            "2. Pass `kb_slug` to `search`, `read`, `write`, or `delete`.\n"
+            "3. Optionally call `get_kb_guidelines(kb_slug)` before writing to understand editorial standards."
+        ),
     )
     async def guide(ctx: Context) -> str:
         user_id = get_user_id(ctx)
