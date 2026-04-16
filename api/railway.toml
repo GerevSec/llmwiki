@@ -4,4 +4,4 @@ dockerfilePath = "Dockerfile"
 [deploy]
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-preDeployCommand = ["python", "scripts/run_migrations.py"]
+preDeployCommand = ["python scripts/run_migrations.py"]
