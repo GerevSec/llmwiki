@@ -33,6 +33,7 @@ from routes.usage import router as usage_router
 from routes.admin import router as admin_router
 from routes.internal import router as internal_router
 from routes.kb_guidelines import router as kb_guidelines_router
+from routes.wiki_comments import router as wiki_comments_router
 from infra.tus import router as tus_router, cleanup_stale_uploads
 
 
@@ -115,4 +116,5 @@ app.include_router(usage_router)
 app.include_router(admin_router)
 app.include_router(internal_router)
 app.include_router(kb_guidelines_router)
+app.include_router(wiki_comments_router)
 app.include_router(tus_router)
