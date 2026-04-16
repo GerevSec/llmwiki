@@ -991,7 +991,7 @@ export default function SettingsPage() {
           wiki_direct_editing_enabled: schedule.wiki_direct_editing_enabled,
           interval_minutes: schedule.interval_minutes,
           max_sources: schedule.max_sources,
-          provider_secret: (schedule as CompileSchedule & { provider_secret?: string }).provider_secret,
+          provider_secret: schedule.provider_secret,
           max_tool_rounds: schedule.max_tool_rounds,
           max_tokens: schedule.max_tokens,
           streamlining_enabled: schedule.streamlining_enabled,
@@ -999,7 +999,7 @@ export default function SettingsPage() {
           streamlining_provider: schedule.streamlining_provider,
           streamlining_model: schedule.streamlining_model,
           streamlining_prompt: schedule.streamlining_prompt,
-          streamlining_provider_secret: (schedule as CompileSchedule & { streamlining_provider_secret?: string }).streamlining_provider_secret,
+          streamlining_provider_secret: schedule.streamlining_provider_secret,
         }),
       })
       const refreshedKbs = await fetchKBs()

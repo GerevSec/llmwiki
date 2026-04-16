@@ -6,7 +6,7 @@ Tracks markdown headers to build breadcrumb context per chunk.
 
 import re
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import asyncpg
 

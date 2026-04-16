@@ -1,8 +1,10 @@
+from fnmatch import fnmatch
+
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ToolAnnotations
 
 from db import scoped_query, scoped_queryrow, service_execute, get_pool
-from .helpers import get_user_id, require_kb_role, glob_match, resolve_path
+from .helpers import get_user_id, require_kb_role, resolve_path
 from .wiki_release import (
     create_draft_release,
     delete_release_page,
@@ -65,7 +67,7 @@ def register(mcp: FastMCP) -> None:
                 kb["id"],
             )
             glob_pat = "/" + path.lstrip("/") if not path.startswith("/") else path
-            matched = [d for d in docs if glob_match(d["path"] + d["filename"], glob_pat)]
+            matched = [d for d in docs if fnmatch(d["path"] + d["filename"], glob_pat)]
         else:
             dir_path, filename = resolve_path(path)
 
@@ -102,7 +104,7 @@ def register(mcp: FastMCP) -> None:
                         await delete_release_page(conn, draft_release_id, page.page_key)
                         deleted_paths.append(f"{page.path}{page.filename}")
                         await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_delete")
-                    await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                    await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id)
                     await prune_old_releases(conn, kb["id"])
             lines = [f"Deleted {len(deletable)} document(s):\n"]
             for d in deletable:

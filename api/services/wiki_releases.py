@@ -16,23 +16,22 @@ from services.document_links import (
     build_document_location,
     rebase_relative_markdown_links,
     rewrite_markdown_links_to_target,
+    _EXTERNAL_PREFIXES,
+    _MARKDOWN_LINK_OPEN_RE,
+    _PATH_SUFFIX_RE,
+    _find_destination_bounds,
+    _make_relative_href,
+    _parse_destination,
+    _resolve_href,
+    _rewrite_markdown_destinations,
+    _should_skip_href,
+    _split_path_suffix,
 )
 from services.kb_access import is_wiki_path
 
 RETENTION_DAYS = 7
-_WIKI_MARKDOWN_TYPES = {"md", "txt", "note"}
 _WIKI_PROTECTED = {("/wiki/", "overview.md"), ("/wiki/", "log.md")}
 _INTERNAL_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
-_MARKDOWN_LINK_OPEN_RE = re.compile(r"!\[[^\]]*\]\(|\[[^\]]*\]\(")
-_PATH_SUFFIX_RE = re.compile(r"^([^?#]*)(\?[^#]*)?(#.*)?$")
-_EXTERNAL_PREFIXES = (
-    "http://",
-    "https://",
-    "mailto:",
-    "tel:",
-    "data:",
-    "javascript:",
-)
 
 
 @dataclass(frozen=True)
@@ -80,7 +79,7 @@ def _split_full_path(full_path: str) -> tuple[str, str]:
 
 
 def _is_wiki_markdown_doc(row: dict[str, Any]) -> bool:
-    return is_wiki_path(row.get("path")) and (row.get("file_type") in _WIKI_MARKDOWN_TYPES)
+    return is_wiki_path(row.get("path")) and (row.get("file_type") in MARKDOWNISH_FILE_TYPES)
 
 
 def normalize_flat_wiki_path(path: str, filename: str) -> tuple[str, str]:
@@ -218,114 +217,6 @@ def _page_slug(value: str | None) -> str:
 def _reset_required_page_content(title: str | None, filename: str) -> str:
     heading = (title or filename.removesuffix(".md").removesuffix(".txt").replace("-", " ").replace("_", " ")).strip()
     return f"# {heading or 'Untitled'}\n\n"
-
-
-def _parse_destination(raw_destination: str) -> tuple[str, str, bool] | None:
-    destination = raw_destination.strip()
-    if not destination:
-        return None
-
-    if destination.startswith("<"):
-        end = destination.find(">")
-        if end == -1:
-            return None
-        return destination[1:end], destination[end + 1 :], True
-
-    parts = destination.split(maxsplit=1)
-    if len(parts) == 1:
-        return parts[0], "", False
-    return parts[0], f" {parts[1]}", False
-
-
-def _should_skip_href(href: str) -> bool:
-    lowered = href.lower()
-    return not href or href.startswith("#") or href.startswith("//") or lowered.startswith(_EXTERNAL_PREFIXES)
-
-
-def _split_path_suffix(href: str) -> tuple[str, str]:
-    match = _PATH_SUFFIX_RE.match(href)
-    if not match:
-        return href, ""
-    return match.group(1), f"{match.group(2) or ''}{match.group(3) or ''}"
-
-
-def _resolve_href(current_dir: str, href: str) -> str:
-    path_part, _suffix = _split_path_suffix(href)
-    if path_part.startswith("/"):
-        resolved = posixpath.normpath(path_part)
-    else:
-        resolved = posixpath.normpath(posixpath.join(current_dir, path_part))
-    return resolved if resolved.startswith("/") else f"/{resolved}"
-
-
-def _make_relative_href(current_dir: str, target_location: str, original_href: str) -> str:
-    relative = posixpath.relpath(target_location, start=current_dir or "/")
-    if relative == ".":
-        relative = posixpath.basename(target_location)
-    if original_href.startswith("./") and not relative.startswith("."):
-        return f"./{relative}"
-    return relative
-
-
-def _find_destination_bounds(content: str, start: int) -> tuple[int, int] | None:
-    depth = 1
-    in_angle = False
-    escape = False
-    idx = start
-
-    while idx < len(content):
-        char = content[idx]
-        if escape:
-            escape = False
-            idx += 1
-            continue
-
-        if char == "\\":
-            escape = True
-            idx += 1
-            continue
-
-        if char == "<" and not in_angle:
-            in_angle = True
-        elif char == ">" and in_angle:
-            in_angle = False
-        elif not in_angle:
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return start, idx
-
-        idx += 1
-
-    return None
-
-
-def _rewrite_markdown_destinations(content: str, rewriter) -> str:
-    parts: list[str] = []
-    cursor = 0
-
-    for match in _MARKDOWN_LINK_OPEN_RE.finditer(content):
-        destination_bounds = _find_destination_bounds(content, match.end())
-        if destination_bounds is None:
-            continue
-
-        start, end = destination_bounds
-        raw_destination = content[start:end]
-        replacement = rewriter(raw_destination.strip())
-        if replacement is None or replacement == raw_destination.strip():
-            continue
-
-        parts.append(content[cursor:start])
-        parts.append(replacement)
-        cursor = end
-
-    if not parts:
-        return content
-
-    parts.append(content[cursor:])
-    return "".join(parts)
 
 
 def _resolve_release_reference(current_page: ReleasePage, href: str) -> str | None:
@@ -502,7 +393,7 @@ async def ensure_initial_wiki_release(
         "FROM documents WHERE knowledge_base_id = $1::uuid AND NOT archived AND path LIKE '/wiki/%%' AND file_type = ANY($2::text[]) "
         "ORDER BY path, filename",
         knowledge_base_id,
-        list(_WIKI_MARKDOWN_TYPES),
+        list(MARKDOWNISH_FILE_TYPES),
     )
     if rows:
         await conn.executemany(
@@ -1074,7 +965,7 @@ async def publish_release(
         existing_rows = await conn.fetch(
             "SELECT id::text AS id, knowledge_base_id::text AS knowledge_base_id, user_id::text AS user_id, filename, path, title, content, tags, sort_order, archived FROM documents WHERE knowledge_base_id = $1::uuid AND path LIKE '/wiki/%%' AND file_type = ANY($2::text[])",
             knowledge_base_id,
-            list(_WIKI_MARKDOWN_TYPES),
+            list(MARKDOWNISH_FILE_TYPES),
         )
         existing = {row["id"]: dict(row) for row in existing_rows}
 

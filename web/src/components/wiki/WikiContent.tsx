@@ -233,12 +233,10 @@ function WikiImage({
   src,
   alt,
   documents,
-  wikiActivePath,
 }: {
   src?: string
   alt?: string
   documents?: DocumentListItem[]
-  wikiActivePath?: string
 }) {
   const token = useUserStore((s) => s.accessToken)
   const [svgContent, setSvgContent] = React.useState<string | null>(null)
@@ -287,7 +285,7 @@ function WikiImage({
     } else {
       setLoading(false)
     }
-  }, [src, documents, token, wikiActivePath])
+  }, [src, documents, token])
 
   // Inline SVG rendering — encode as data URI to avoid React DOM warnings for SVG elements like <text>
   if (svgContent) {

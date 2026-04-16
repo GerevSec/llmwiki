@@ -1,11 +1,12 @@
 import logging
+from fnmatch import fnmatch
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ToolAnnotations
 
 from db import scoped_query
-from .helpers import get_user_id, resolve_kb, deep_link, glob_match, MAX_LIST, MAX_SEARCH
+from .helpers import get_user_id, resolve_kb, deep_link, MAX_LIST, MAX_SEARCH
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ async def _list_documents(user_id: str, kb: dict, target: str, tags: list[str] |
 
     if target not in ("*", "**", "**/*"):
         glob_pat = "/" + target.lstrip("/") if not target.startswith("/") else target
-        docs = [d for d in docs if glob_match(d["path"] + d["filename"], glob_pat)]
+        docs = [d for d in docs if fnmatch(d["path"] + d["filename"], glob_pat)]
 
     if tags:
         tag_set = {t.lower() for t in tags}

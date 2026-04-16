@@ -6,6 +6,7 @@ import {
   Copy, Check, Loader2, ArrowRight, ArrowLeft,
   FileText, BookOpen, PenTool, ExternalLink,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
 import { MCP_URL } from '@/lib/mcp'
@@ -44,7 +45,7 @@ export default function OnboardingPage() {
       setCreatedSlug(kb.slug)
       setStep('connect')
     } catch (err) {
-      console.error('Failed to create wiki:', err)
+      toast.error((err as Error).message || 'Failed to create wiki')
     } finally {
       setCreating(false)
     }

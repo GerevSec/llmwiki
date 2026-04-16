@@ -5,10 +5,12 @@ import logging
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import TextContent, ImageContent, ToolAnnotations
 
+from fnmatch import fnmatch
+
 from db import scoped_query, scoped_queryrow
 from .helpers import (
     get_user_id, resolve_kb, deep_link, resolve_path,
-    load_s3_bytes, parse_page_range, glob_match,
+    load_s3_bytes, parse_page_range,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +151,7 @@ async def _read_batch(user_id: str, kb: dict, path: str) -> str:
     )
 
     glob_pat = "/" + path.lstrip("/") if not path.startswith("/") else path
-    docs = [d for d in docs if glob_match(d["path"] + d["filename"], glob_pat)]
+    docs = [d for d in docs if fnmatch(d["path"] + d["filename"], glob_pat)]
 
     if not docs:
         return f"No documents matching `{path}` in {kb['slug']}."

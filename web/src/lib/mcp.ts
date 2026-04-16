@@ -29,19 +29,3 @@ export function buildOAuthMcpConfig(): string {
   )
 }
 
-export function buildApiKeyMcpConfig(apiKey: string): string {
-  return JSON.stringify(
-    {
-      mcpServers: {
-        llmwiki: {
-          url: getMcpUrl(),
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-          },
-        },
-      },
-    },
-    null,
-    2,
-  )
-}

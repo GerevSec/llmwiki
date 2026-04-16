@@ -1,7 +1,6 @@
 'use client'
 
 import * as React from 'react'
-import { Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { Loader2, Shield, Check, X } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
@@ -206,8 +205,8 @@ function OAuthConsentContent() {
 
 export default function OAuthConsentPage() {
   return (
-    <Suspense>
+    <React.Suspense>
       <OAuthConsentContent />
-    </Suspense>
+    </React.Suspense>
   )
 }

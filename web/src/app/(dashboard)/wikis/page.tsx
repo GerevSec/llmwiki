@@ -107,7 +107,7 @@ export default function WikisPage() {
       const kb = await createKB(`${displayName}'s Wiki`)
       router.push(`/wikis/${kb.slug}`)
     } catch (err) {
-      console.error('Failed to create KB:', err)
+      toast.error((err as Error).message || 'Failed to create wiki')
     } finally {
       setCreating(false)
     }
@@ -122,7 +122,7 @@ export default function WikisPage() {
       setName('')
       router.push(`/wikis/${kb.slug}`)
     } catch (err) {
-      console.error('Failed to create KB:', err)
+      toast.error((err as Error).message || 'Failed to create wiki')
     } finally {
       setCreating(false)
     }
@@ -137,7 +137,6 @@ export default function WikisPage() {
       setDeleteConfirmation('')
       toast.success(`Deleted ${deleteDialog.kbName}`)
     } catch (err) {
-      console.error('Failed to delete KB:', err)
       toast.error((err as Error).message || 'Failed to delete wiki')
     } finally {
       setDeletingKbId(null)

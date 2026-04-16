@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup, Comment
 from bs4.element import NavigableString, Tag
 
 from .models import Element, Image, ParseResult
-from .forms import FormExtractor, FormElement
+from .forms import FormExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -516,8 +516,6 @@ class Parser:
         "source": ["src", "srcset"],
         "link": ["href"],
         "form": ["action"],
-        "video": ["src", "poster"],
-        "audio": ["src"],
     }
 
     def _rewrite_dom_urls(self) -> None:
@@ -664,7 +662,6 @@ class Parser:
         text = _newlines.sub("\n\n", text)
         lines = [line.strip() for line in text.split("\n")]
         text = "\n".join(lines)
-        text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
     def parse(self) -> ParseResult:

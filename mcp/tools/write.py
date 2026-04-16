@@ -32,20 +32,18 @@ async def _create_note(
     if not dir_path.startswith("/"):
         dir_path = "/" + dir_path
 
-    # Detect asset extensions
-    _title_lower = title.lower()
+    title_lower = title.lower()
     asset_ext = None
     for ext in _ASSET_EXTENSIONS:
-        if _title_lower.endswith(ext):
+        if title_lower.endswith(ext):
             asset_ext = ext
             break
 
-    # Derive filename (slug) from title
     if asset_ext:
-        filename = re.sub(r"[^\w\s\-.]", "", _title_lower.replace(" ", "-"))
+        filename = re.sub(r"[^\w\s\-.]", "", title_lower.replace(" ", "-"))
         file_type = asset_ext.lstrip(".")
     else:
-        slug = _title_lower
+        slug = title_lower
         # Strip .md if Claude passed a filename as the title
         slug = re.sub(r"\.(md|txt)$", "", slug)
         filename = re.sub(r"[^\w\s\-.]", "", slug.replace(" ", "-"))
@@ -76,7 +74,7 @@ async def _create_note(
                     content=content,
                     tags=tags,
                 )
-                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id)
                 await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
                 await prune_old_releases(conn, kb["id"])
         link = deep_link(kb["slug"], dir_path, filename)
@@ -141,7 +139,7 @@ async def _edit_note(user_id: str, kb: dict, path: str, old_text: str, new_text:
                     sort_order=page.sort_order,
                     page_key=page.page_key,
                 )
-                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id)
                 await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
                 await prune_old_releases(conn, kb["id"])
         link = deep_link(kb["slug"], dir_path, filename)
@@ -196,7 +194,7 @@ async def _append_note(user_id: str, kb: dict, path: str, content: str) -> str:
                     sort_order=page.sort_order,
                     page_key=page.page_key,
                 )
-                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id, mode="mcp")
+                await publish_release(conn, kb["id"], draft_release_id, actor_user_id=user_id)
                 await record_dirty_scope(conn, kb["id"], full_path=f"{page.path}{page.filename}", reason="mcp_edit")
                 await prune_old_releases(conn, kb["id"])
         link = deep_link(kb["slug"], dir_path, filename)

@@ -780,6 +780,7 @@ function SourceTreeNode({
   const renameInputRef = React.useRef<HTMLInputElement>(null)
   const [contextOpen, setContextOpen] = React.useState(false)
   const [contextPos, setContextPos] = React.useState<{ x: number; y: number } | null>(null)
+  const [dragOver, setDragOver] = React.useState(false)
 
   const startRename = () => {
     if (!node.doc) return
@@ -799,8 +800,6 @@ function SourceTreeNode({
   const folderPath = node.type === 'folder' ? parentPath + node.name + '/' : parentPath
 
   if (node.type === 'folder') {
-    const [dragOver, setDragOver] = React.useState(false)
-
     return (
       <div>
         <div

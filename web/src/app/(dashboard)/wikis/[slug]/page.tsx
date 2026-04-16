@@ -40,7 +40,6 @@ export default function KBPage() {
     <KBDetail
       key={kb.id}
       kbId={kb.id}
-      kbSlug={kb.slug}
       kbName={kb.name}
       kbRole={kb.role}
       wikiDirectEditingEnabled={kb.wiki_direct_editing_enabled}

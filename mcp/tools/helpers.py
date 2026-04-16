@@ -1,6 +1,5 @@
 import os
 import logging
-from fnmatch import fnmatch
 
 import aioboto3
 from mcp.server.fastmcp import Context
@@ -35,10 +34,6 @@ def get_user_id(ctx: Context) -> str:
 def deep_link(kb_slug: str, path: str, filename: str) -> str:
     full = (path.rstrip("/") + "/" + filename).lstrip("/")
     return f"{settings.APP_URL}/wikis/{kb_slug}/{full}"
-
-
-def glob_match(filepath: str, pattern: str) -> bool:
-    return fnmatch(filepath, pattern)
 
 
 def resolve_path(path: str) -> tuple[str, str]:

@@ -41,6 +41,7 @@ interface WikiComment {
 }
 
 const wikiPathCache = new Map<string, string>()
+const SCAFFOLD_FILES = new Set(['index.json', 'overview.md', 'log.md'])
 
 function getWikiPathStorageKey(kbId: string): string {
   return `llmwiki:active-wiki-path:${kbId}`
@@ -176,7 +177,6 @@ function findFirstPath(nodes: WikiNode[]): string | null {
 
 type Props = {
   kbId: string
-  kbSlug?: string
   kbName: string
   kbRole: string
   wikiDirectEditingEnabled: boolean
@@ -209,7 +209,6 @@ export function KBDetail({
 
   // Wiki state
   const indexDoc = wikiDocs.find((d) => d.filename === 'index.json' && d.path === '/wiki/')
-  const SCAFFOLD_FILES = new Set(['index.json', 'overview.md', 'log.md'])
   const hasNavigableWiki = React.useMemo(
     () => wikiDocs.some((d) => d.path === '/wiki/' ? !SCAFFOLD_FILES.has(d.filename) : true),
     [wikiDocs],
