@@ -20,7 +20,7 @@ import type { DocumentListItem, WikiNode, WikiSubsection } from '@/lib/types'
 import { getPublicEnv } from '@/lib/public-env'
 
 const API_URL = getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
-const GUIDELINES_COMMENTS_ENABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_ENABLED') === 'true'
+const GUIDELINES_COMMENTS_DISABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_DISABLED') === 'true'
 const KB_ADMIN_ROLES = new Set(['owner', 'admin'])
 
 interface WikiComment {
@@ -28,15 +28,16 @@ interface WikiComment {
   kb_id: string
   page_key: string
   body: string
-  status: 'open' | 'delivered' | 'resolved' | 'archived' | 'promoted'
+  status: 'open' | 'resolved' | 'failed' | 'archived'
+  failure_reason: string | null
   system_note: string | null
   author_id: string | null
   created_at: string
-  delivered_at: string | null
-  delivered_compile_id: string | null
+  compiled_at: string | null
+  compiled_run_id: string | null
   resolved_at: string | null
   resolved_by: string | null
-  promoted_to_guideline_id: string | null
+  promoted_to_directive_id: string | null
 }
 
 const wikiPathCache = new Map<string, string>()
@@ -747,10 +748,11 @@ export function KBDetail({
   const [commentSubmitting, setCommentSubmitting] = React.useState(false)
   const [promoteCommentId, setPromoteCommentId] = React.useState<string | null>(null)
   const [promoteOverrideBody, setPromoteOverrideBody] = React.useState('')
+  const [showArchivedComments, setShowArchivedComments] = React.useState(false)
 
   // Load comments when the active wiki page changes
   React.useEffect(() => {
-    if (!GUIDELINES_COMMENTS_ENABLED || !token || !activeWikiDocId) {
+    if (GUIDELINES_COMMENTS_DISABLED || !token || !activeWikiDocId) {
       setComments([])
       return
     }
@@ -773,16 +775,6 @@ export function KBDetail({
       toast.error((err as Error).message || 'Failed to add comment')
     } finally {
       setCommentSubmitting(false)
-    }
-  }
-
-  const handleResolveComment = async (commentId: string) => {
-    if (!token) return
-    try {
-      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/comments/${commentId}/resolve`, token, { method: 'POST' })
-      setComments((prev) => prev.map((item) => (item.id === commentId ? c : item)))
-    } catch (err) {
-      toast.error((err as Error).message || 'Failed to resolve comment')
     }
   }
 
@@ -936,7 +928,7 @@ export function KBDetail({
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      {GUIDELINES_COMMENTS_ENABLED && (
+                      {!GUIDELINES_COMMENTS_DISABLED && (
                         <button
                           onClick={() => setShowComments((c) => !c)}
                           className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent transition-colors cursor-pointer"
@@ -1006,7 +998,7 @@ export function KBDetail({
             </div>
           )}
         </div>
-        {GUIDELINES_COMMENTS_ENABLED && showComments && !!wikiActivePath && !activeSourceDocId && (
+        {!GUIDELINES_COMMENTS_DISABLED && showComments && !!wikiActivePath && !activeSourceDocId && (
           <div className="w-80 shrink-0 border-l border-border flex flex-col overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
               <span className="text-sm font-medium">Comments</span>
@@ -1018,61 +1010,88 @@ export function KBDetail({
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
-              {comments.length === 0 ? (
+              {isKbAdmin && (comments.some((c) => c.status === 'open') || comments.some((c) => c.status === 'failed')) && (
+                <div className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
+                  <span>{comments.filter((c) => c.status === 'open').length} pending</span>
+                  {comments.some((c) => c.status === 'failed') && (
+                    <><span>·</span><span className="text-destructive">{comments.filter((c) => c.status === 'failed').length} failed</span></>
+                  )}
+                </div>
+              )}
+              {comments.filter((c) => showArchivedComments || c.status !== 'archived').length === 0 ? (
                 <p className="text-xs text-muted-foreground">No comments yet for this page.</p>
               ) : (
-                comments.map((c) => (
-                  <div key={c.id} className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className={
-                        c.status === 'resolved' ? 'text-green-600 dark:text-green-400 font-medium' :
-                        c.status === 'promoted' ? 'text-purple-600 dark:text-purple-400 font-medium' :
-                        c.status === 'delivered' ? 'text-primary font-medium' :
-                        'text-muted-foreground'
-                      }>{c.status}</span>
-                      <span className="text-muted-foreground">{new Date(c.created_at).toLocaleDateString()}</span>
-                    </div>
-                    <p className="text-foreground leading-relaxed">{c.body}</p>
-                    {isKbAdmin && c.status === 'delivered' && promoteCommentId !== c.id && (
-                      <div className="flex gap-1.5 pt-1">
-                        <button
-                          onClick={() => handleResolveComment(c.id)}
-                          className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
-                        >Resolve</button>
-                        <button
-                          onClick={() => { setPromoteCommentId(c.id); setPromoteOverrideBody('') }}
-                          className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
-                        >Promote</button>
-                        <button
-                          onClick={() => handleArchiveComment(c.id)}
-                          className="rounded px-2 py-1 text-xs text-destructive border border-destructive/30 hover:bg-destructive/10 cursor-pointer"
-                        >Archive</button>
-                      </div>
-                    )}
-                    {isKbAdmin && c.status === 'delivered' && promoteCommentId === c.id && (
-                      <div className="space-y-1.5 pt-1">
-                        <textarea
-                          value={promoteOverrideBody}
-                          onChange={(e) => setPromoteOverrideBody(e.target.value)}
-                          placeholder="Override text (optional — leave blank to use comment body)"
-                          rows={2}
-                          autoFocus
-                          className="w-full rounded border border-input bg-background px-2 py-1.5 text-xs"
-                        />
-                        <div className="flex gap-1.5">
-                          <button
-                            onClick={() => handlePromoteComment(c.id)}
-                            className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
-                          >Promote to guideline</button>
-                          <button
-                            onClick={() => { setPromoteCommentId(null); setPromoteOverrideBody('') }}
-                            className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
-                          >Cancel</button>
+                comments
+                  .filter((c) => showArchivedComments || c.status !== 'archived')
+                  .map((c) => (
+                    <div key={c.id} className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={
+                            c.status === 'resolved' ? 'text-green-600 dark:text-green-400 font-medium' :
+                            c.status === 'failed' ? 'text-destructive font-medium' :
+                            c.status === 'archived' ? 'text-muted-foreground/50' :
+                            'text-muted-foreground'
+                          }>{c.status}</span>
+                          {c.status === 'failed' && c.failure_reason && (
+                            <span className="text-destructive/70">({c.failure_reason})</span>
+                          )}
+                          {c.promoted_to_directive_id && (
+                            <span className="rounded-full bg-green-100 dark:bg-green-900/30 px-1.5 py-0.5 text-green-700 dark:text-green-400">Promoted to guideline</span>
+                          )}
                         </div>
+                        <span className="text-muted-foreground shrink-0">{new Date(c.created_at).toLocaleDateString()}</span>
                       </div>
-                    )}
-                  </div>
-                ))
+                      <p className="text-foreground leading-relaxed">{c.body}</p>
+                      {isKbAdmin && c.status !== 'archived' && promoteCommentId !== c.id && (
+                        <div className="flex gap-1.5 pt-1">
+                          <button
+                            onClick={() => { setPromoteCommentId(c.id); setPromoteOverrideBody('') }}
+                            className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
+                          >Promote</button>
+                          <button
+                            onClick={() => handleArchiveComment(c.id)}
+                            title={
+                              c.status === 'resolved' ? 'Stays in history but hidden; wiki is unchanged' :
+                              c.status === 'failed' ? 'Will not be retried' :
+                              'Will not be included in next compile'
+                            }
+                            className="rounded px-2 py-1 text-xs text-destructive border border-destructive/30 hover:bg-destructive/10 cursor-pointer"
+                          >Archive</button>
+                        </div>
+                      )}
+                      {isKbAdmin && c.status !== 'archived' && promoteCommentId === c.id && (
+                        <div className="space-y-1.5 pt-1">
+                          <textarea
+                            value={promoteOverrideBody}
+                            onChange={(e) => setPromoteOverrideBody(e.target.value)}
+                            placeholder="Override text (optional — leave blank to use comment body)"
+                            rows={2}
+                            autoFocus
+                            className="w-full rounded border border-input bg-background px-2 py-1.5 text-xs"
+                          />
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => handlePromoteComment(c.id)}
+                              className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
+                            >Promote to guideline</button>
+                            <button
+                              onClick={() => { setPromoteCommentId(null); setPromoteOverrideBody('') }}
+                              className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
+                            >Cancel</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+              )}
+              {comments.some((c) => c.status === 'archived') && (
+                <button
+                  onClick={() => setShowArchivedComments((v) => !v)}
+                  className="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+                >
+                  {showArchivedComments ? 'Hide archived' : `Show archived (${comments.filter((c) => c.status === 'archived').length})`}
+                </button>
               )}
             </div>
             <div className="border-t border-border p-3 space-y-2">

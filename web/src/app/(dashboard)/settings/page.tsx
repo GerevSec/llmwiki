@@ -101,10 +101,11 @@ interface CompileSchedule {
 
 interface CompilePreview {
   pending_source_count: number
+  pending_comment_count?: number
 }
 
 const ADMIN_ROLES = new Set(['owner', 'admin'])
-const GUIDELINES_COMMENTS_ENABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_ENABLED') === 'true'
+const GUIDELINES_COMMENTS_DISABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_DISABLED') === 'true'
 const DEFAULT_MAX_SOURCES = 20
 const DEFAULT_MAX_TOOL_ROUNDS = 50
 const DEFAULT_MAX_TOKENS = 50_000
@@ -179,6 +180,7 @@ function ScheduleCard({
   kb,
   schedule,
   pendingCount,
+  pendingCommentCount,
   runs,
   streamliningRuns,
   members,
@@ -205,6 +207,7 @@ function ScheduleCard({
   kb: KnowledgeBase
   schedule: CompileSchedule | undefined
   pendingCount: number | undefined
+  pendingCommentCount: number | undefined
   runs: CompileRun[]
   streamliningRuns: StreamliningRun[]
   members: Member[]
@@ -253,7 +256,9 @@ function ScheduleCard({
           <div className="flex items-center gap-2">
             {pendingCount !== undefined && (
               <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs text-muted-foreground">
-                {pendingCount} pending
+                {pendingCount} source{pendingCount === 1 ? '' : 's'}
+                {pendingCommentCount !== undefined && pendingCommentCount > 0 && ` · ${pendingCommentCount} comment${pendingCommentCount === 1 ? '' : 's'}`}
+                {' '}pending
               </span>
             )}
             <HoverCard openDelay={150}>
@@ -270,10 +275,13 @@ function ScheduleCard({
               <HoverCardContent align="end" className="w-64 text-sm">
                 {pendingCount === undefined ? (
                   <p className="text-muted-foreground">Checking pending sources…</p>
-                ) : pendingCount === 0 ? (
+                ) : pendingCount === 0 && (!pendingCommentCount || pendingCommentCount === 0) ? (
                   <p className="text-muted-foreground">No new or changed sources are pending.</p>
                 ) : (
-                  <p className="text-muted-foreground">This will compile {pendingCount} new or changed source{pendingCount === 1 ? '' : 's'}.</p>
+                  <div className="text-muted-foreground space-y-1">
+                    {pendingCount > 0 && <p>This will compile {pendingCount} new or changed source{pendingCount === 1 ? '' : 's'}.</p>}
+                    {pendingCommentCount !== undefined && pendingCommentCount > 0 && <p>…and {pendingCommentCount} unresolved comment{pendingCommentCount === 1 ? '' : 's'}.</p>}
+                  </div>
                 )}
               </HoverCardContent>
             </HoverCard>
@@ -578,7 +586,7 @@ function ScheduleCard({
         </div>
       )}
 
-      {isAdmin && GUIDELINES_COMMENTS_ENABLED && (
+      {isAdmin && !GUIDELINES_COMMENTS_DISABLED && (
         <div className="space-y-2">
           <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">KB Guidelines</div>
           {guidelines.length === 0 && (
@@ -670,7 +678,7 @@ function ScheduleCard({
                     </span>
                     <span className="text-muted-foreground">{run.provider}</span>
                     <span className="text-muted-foreground">{run.source_count} source{run.source_count === 1 ? '' : 's'}</span>
-                    {GUIDELINES_COMMENTS_ENABLED && (run.telemetry?.comments_skipped_count ?? 0) > 0 && (
+                    {!GUIDELINES_COMMENTS_DISABLED && (run.telemetry?.comments_skipped_count ?? 0) > 0 && (
                       <span className="text-muted-foreground">{run.telemetry!.comments_skipped_count} comment{run.telemetry!.comments_skipped_count === 1 ? '' : 's'} skipped</span>
                     )}
                   </div>
@@ -737,6 +745,7 @@ export default function SettingsPage() {
   const [deleteDialog, setDeleteDialog] = React.useState<{ kbId: string; kbName: string } | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = React.useState('')
   const [pendingCounts, setPendingCounts] = React.useState<Record<string, number>>({})
+  const [pendingCommentCounts, setPendingCommentCounts] = React.useState<Record<string, number>>({})
   const [compileRuns, setCompileRuns] = React.useState<Record<string, CompileRun[]>>({})
   const [streamliningRuns, setStreamliningRuns] = React.useState<Record<string, StreamliningRun[]>>({})
   const [schedules, setSchedules] = React.useState<Record<string, CompileSchedule>>({})
@@ -755,7 +764,7 @@ export default function SettingsPage() {
     const adminKbs = knowledgeBases.filter((kb) => ADMIN_ROLES.has(kb.role))
     Promise.all(adminKbs.map(async (kb) => {
       const [preview, runs, streamlining, schedule, members, guidelines] = await Promise.all([
-        apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
+        apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0, pending_comment_count: 0 })),
         apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
         apiFetch<StreamliningRun[]>(`/v1/knowledge-bases/${kb.id}/streamlining-runs?limit=5`, token).catch(() => []),
         apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token).catch(() => ({
@@ -786,13 +795,14 @@ export default function SettingsPage() {
           next_streamlining_at: null,
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
-        GUIDELINES_COMMENTS_ENABLED
+        !GUIDELINES_COMMENTS_DISABLED
           ? apiFetch<Guideline[]>(`/api/kb/${kb.id}/guidelines`, token).catch(() => [])
           : Promise.resolve([] as Guideline[]),
       ])
       return { kbId: kb.id, preview, runs, streamlining, schedule, members, guidelines }
     })).then((results) => {
       setPendingCounts(Object.fromEntries(results.map((r) => [r.kbId, r.preview.pending_source_count])))
+      setPendingCommentCounts(Object.fromEntries(results.map((r) => [r.kbId, r.preview.pending_comment_count ?? 0])))
       setCompileRuns(Object.fromEntries(results.map((r) => [r.kbId, r.runs])))
       setStreamliningRuns(Object.fromEntries(results.map((r) => [r.kbId, r.streamlining])))
       setSchedules(Object.fromEntries(results.map((r) => [r.kbId, r.schedule])))
@@ -818,13 +828,14 @@ export default function SettingsPage() {
   const refreshKbAdminData = async (kb: KnowledgeBase) => {
     if (!token || !ADMIN_ROLES.has(kb.role)) return
     const [preview, runs, streamlining, schedule, members] = await Promise.all([
-      apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
+      apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0, pending_comment_count: 0 })),
       apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
       apiFetch<StreamliningRun[]>(`/v1/knowledge-bases/${kb.id}/streamlining-runs?limit=5`, token).catch(() => []),
       apiFetch<CompileSchedule>(`/v1/knowledge-bases/${kb.id}/compile-schedule`, token),
       apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token),
     ])
     setPendingCounts((prev) => ({ ...prev, [kb.id]: preview.pending_source_count }))
+    setPendingCommentCounts((prev) => ({ ...prev, [kb.id]: preview.pending_comment_count ?? 0 }))
     setCompileRuns((prev) => ({ ...prev, [kb.id]: runs }))
     setStreamliningRuns((prev) => ({ ...prev, [kb.id]: streamlining }))
     setSchedules((prev) => ({ ...prev, [kb.id]: schedule }))
@@ -1113,6 +1124,7 @@ export default function SettingsPage() {
               kb={kb}
               schedule={schedules[kb.id]}
               pendingCount={pendingCounts[kb.id]}
+              pendingCommentCount={pendingCommentCounts[kb.id]}
               runs={compileRuns[kb.id] || []}
               streamliningRuns={streamliningRuns[kb.id] || []}
               members={membersByKb[kb.id] || []}
