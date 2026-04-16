@@ -149,6 +149,45 @@ class TestPeriodicCompileHelpers:
         assert "AUTOMATION SUMMARY" in prompt
         assert "Prefer concise updates." in prompt
 
+    def test_build_compile_prompt_injects_guidelines_block_before_sources(self):
+        sources = [
+            PendingSource(id="1", path="/", filename="doc.pdf", title="Doc", version=1, content_chars=10, updated_at=None)
+        ]
+        guidelines = "<kb_guidelines>\n- Keep pages short\n- Always cite sources\n</kb_guidelines>"
+
+        prompt = build_compile_prompt("kb", sources, guidelines_block=guidelines)
+
+        assert "<kb_guidelines>" in prompt
+        assert "Keep pages short" in prompt
+        # guidelines must appear before the source listing
+        assert prompt.index("<kb_guidelines>") < prompt.index("Changed sources:")
+        # no feedback block when no comments
+        assert "<editor_feedback" not in prompt
+
+    def test_build_compile_prompt_injects_editor_feedback_when_comments_provided(self):
+        sources = [
+            PendingSource(id="1", path="/", filename="doc.pdf", title="Doc", version=1, content_chars=10, updated_at=None)
+        ]
+        page_key = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        comments_by_page = {page_key: [{"id": "c1", "body": "Update the diagram"}, {"id": "c2", "body": "Fix broken link"}]}
+
+        prompt = build_compile_prompt("kb", sources, comments_by_page=comments_by_page)
+
+        assert f'<editor_feedback page="{page_key}">' in prompt
+        assert "- Update the diagram" in prompt
+        assert "- Fix broken link" in prompt
+        assert "</editor_feedback>" in prompt
+
+    def test_build_compile_prompt_omits_guidelines_and_feedback_when_empty(self):
+        sources = [
+            PendingSource(id="1", path="/", filename="doc.pdf", title="Doc", version=1, content_chars=10, updated_at=None)
+        ]
+
+        prompt = build_compile_prompt("kb", sources)
+
+        assert "<kb_guidelines>" not in prompt
+        assert "<editor_feedback" not in prompt
+
     def test_hash_api_key_is_stable(self):
         assert hash_api_key("sv_test_key") == hash_api_key("sv_test_key")
 

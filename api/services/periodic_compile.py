@@ -23,6 +23,7 @@ from services.encryption import decrypt_secret
 from services.llm_json import loads_lenient_json
 from services.openrouter_client import post_openrouter_chat_completion
 from services.wiki_guide import WIKI_GUIDE_TEXT
+from services.kb_guidelines import render_guidelines_block
 from services.wiki_releases import create_draft_release, get_release_pages, publish_release, record_dirty_scope
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -198,7 +199,13 @@ def filter_pending_sources(
     return pending[:max_sources]
 
 
-def build_compile_prompt(knowledge_base: str, sources: list[PendingSource], extra_prompt: str = "") -> str:
+def build_compile_prompt(
+    knowledge_base: str,
+    sources: list[PendingSource],
+    extra_prompt: str = "",
+    guidelines_block: str = "",
+    comments_by_page: dict[str, list[dict]] | None = None,
+) -> str:
     lines = [
         WIKI_GUIDE_TEXT.rstrip(),
         "",
@@ -224,10 +231,17 @@ def build_compile_prompt(knowledge_base: str, sources: list[PendingSource], extr
         "- Never pass `/wiki/team.md` as a parent for a separate filename — that produces a `/wiki/team.md/members.md` nested path which the UI cannot navigate.",
         "- Use real subdirectories (`/wiki/entities/`, `/wiki/concepts/`), not `.md`-suffixed pseudo-folders.",
         "",
-        "Changed sources:",
     ]
+    if guidelines_block:
+        lines.extend([guidelines_block, ""])
+    lines.append("Changed sources:")
     for source in sources:
         lines.append(f"- `{source.full_path}` (version {source.version})")
+    if comments_by_page:
+        lines.extend(["", "Editor feedback on current wiki pages (address in this run):"])
+        for page_key, comments in comments_by_page.items():
+            bodies = "\n".join(f"- {c['body']}" for c in comments)
+            lines.append(f'<editor_feedback page="{page_key}">\n{bodies}\n</editor_feedback>')
     if extra_prompt:
         lines.extend(["", "Additional instructions:", extra_prompt])
     return "\n".join(lines)
@@ -600,6 +614,53 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 )
                 run_started_at = datetime.now(UTC)
                 source_batches = _chunk_pending_sources(pending, batch_size=_effective_recompile_batch_size(target))
+                guidelines_block = await render_guidelines_block(pool, kb["id"])
+                target_page_key_rows = await conn.fetch(
+                    "SELECT wrp.page_key FROM wiki_release_pages wrp "
+                    "JOIN knowledge_base_settings kbs ON kbs.active_wiki_release_id = wrp.release_id "
+                    "WHERE kbs.knowledge_base_id = $1::uuid",
+                    kb["id"],
+                )
+                target_page_keys = [str(row["page_key"]) for row in target_page_key_rows]
+                comment_ids: list[str] = []
+                comments_by_page: dict[str, list[dict]] = {}
+                if target_page_keys:
+                    snapshot_rows = await conn.fetch(
+                        "WITH ranked AS ("
+                        " SELECT id::text AS id, page_key::text AS page_key, body,"
+                        "        ROW_NUMBER() OVER (PARTITION BY page_key ORDER BY created_at DESC, id DESC) AS rn"
+                        " FROM wiki_page_comments"
+                        " WHERE kb_id = $1::uuid"
+                        "   AND page_key = ANY($2::uuid[])"
+                        "   AND status = 'open'"
+                        ")"
+                        " SELECT id, page_key, body FROM ranked WHERE rn <= 20",
+                        kb["id"],
+                        target_page_keys,
+                    )
+                    for row in snapshot_rows:
+                        comment_ids.append(row["id"])
+                        comments_by_page.setdefault(row["page_key"], []).append(
+                            {"id": row["id"], "body": row["body"]}
+                        )
+                    if comment_ids:
+                        skipped_count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM wiki_page_comments"
+                            " WHERE kb_id = $1::uuid AND page_key = ANY($2::uuid[]) AND status = 'open'"
+                            "   AND NOT (id = ANY($3::uuid[]))",
+                            kb["id"],
+                            target_page_keys,
+                            comment_ids,
+                        )
+                        await conn.execute(
+                            "UPDATE compile_runs SET telemetry = telemetry || $1::jsonb WHERE id = $2::uuid",
+                            json.dumps({
+                                "comment_ids": comment_ids,
+                                "comments_skipped_count": int(skipped_count),
+                                "schema_version": 1,
+                            }),
+                            run_id,
+                        )
                 batch_responses: list[dict[str, Any]] = []
                 for batch_index, source_batch in enumerate(source_batches, start=1):
                     structure_guidance = "" if target.reset_wiki else await build_compile_wiki_structure_guidance(conn, kb["id"])
@@ -607,7 +668,13 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                     if target.reset_wiki and len(source_batches) > 1:
                         prompt_parts.append(_build_recompile_batch_instructions(batch_index, len(source_batches)))
                     merged_prompt = "\n\n".join(part for part in prompt_parts if part)
-                    prompt = build_compile_prompt(kb["slug"], source_batch, merged_prompt)
+                    prompt = build_compile_prompt(
+                        kb["slug"],
+                        source_batch,
+                        merged_prompt,
+                        guidelines_block,
+                        comments_by_page or None,
+                    )
                     batch_wall_start = time.monotonic()
                     log_compile(
                         "batch_start",
@@ -659,6 +726,14 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 )[:4000] or None
                 response = batch_responses[-1]
                 await _finish_run(conn, run_id, "succeeded", response_excerpt=response_excerpt)
+                if comment_ids:
+                    await conn.execute(
+                        "UPDATE wiki_page_comments"
+                        " SET status = 'delivered', delivered_at = now(), delivered_compile_id = $1::uuid"
+                        " WHERE id = ANY($2::uuid[]) AND status = 'open'",
+                        run_id,
+                        comment_ids,
+                    )
                 await _update_kb_settings_run_state(conn, kb["id"], "succeeded", None, advance_schedule, target.interval_minutes)
                 for source in pending:
                     await record_dirty_scope(conn, kb["id"], full_path=source.full_path, reason="compile")
