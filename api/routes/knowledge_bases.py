@@ -122,6 +122,7 @@ class RecompileNowOut(CompileNowOut):
 class CompilePreviewOut(BaseModel):
     knowledge_base: str
     pending_source_count: int
+    pending_comment_count: int = 0
 
 
 class CompileRunOut(BaseModel):
@@ -439,7 +440,16 @@ async def get_compile_preview(
         kb["slug"],
         settings_row["compile_max_sources"] if settings_row else settings.LLMWIKI_COMPILE_MAX_SOURCES,
     )
-    return {"knowledge_base": kb["slug"], "pending_source_count": len(pending)}
+    pending_comment_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM kb_directives "
+        "WHERE kb_id = $1::uuid AND kind = 'comment' AND status IN ('open', 'failed')",
+        kb_id,
+    )
+    return {
+        "knowledge_base": kb["slug"],
+        "pending_source_count": len(pending),
+        "pending_comment_count": int(pending_comment_count or 0),
+    }
 
 
 @router.get("/{kb_id}/compile-runs", response_model=list[CompileRunOut])

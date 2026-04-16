@@ -114,6 +114,19 @@ def default_max_sources() -> int:
     return DEFAULT_MAX_SOURCES
 
 
+# Critic Amendment 1: only expose safe exception class names in failure_reason.
+# Raw str(exc) is never stored — it may contain user data, API keys, or stack traces.
+_ALLOWED_EXC_NAMES = {
+    "ProviderTimeout", "ProviderRateLimited", "ProviderAuthError",
+    "ProviderBadRequest", "ProviderServerError", "ConnectionError", "TimeoutError",
+}
+
+
+def _safe_failure_reason(exc: BaseException) -> str:
+    name = type(exc).__name__
+    return name if name in _ALLOWED_EXC_NAMES else "ProviderError"
+
+
 def default_max_tool_rounds() -> int:
     return DEFAULT_MAX_TOOL_ROUNDS
 
@@ -555,6 +568,27 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
             )
             run_mode = "recompile" if target.reset_wiki else "compile"
             if not pending:
+                # Amendment 3: if called from the auto-scheduler, re-check for open/failed
+                # comments under the advisory lock (guards against pre-flight race condition).
+                if advance_schedule:
+                    has_comments = await conn.fetchval(
+                        "SELECT EXISTS("
+                        " SELECT 1 FROM kb_directives"
+                        " WHERE kb_id = $1::uuid AND kind = 'comment' AND status IN ('open', 'failed')"
+                        " LIMIT 1"
+                        ")",
+                        kb["id"],
+                    )
+                    if not has_comments:
+                        # Truly no work — advance schedule silently, no compile_runs row.
+                        await _advance_schedule_without_run(conn, kb["id"], target.interval_minutes)
+                        log_compile(
+                            "run_auto_skipped",
+                            kb=kb["slug"],
+                            kb_id=kb["id"],
+                            reason="no_new_sources_or_comments",
+                        )
+                        return {"knowledge_base": kb["slug"], "status": "skipped", "source_count": 0}
                 run_id = await _record_run(
                     conn,
                     kb["id"],
@@ -627,12 +661,12 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 if target_page_keys:
                     snapshot_rows = await conn.fetch(
                         "WITH ranked AS ("
-                        " SELECT id::text AS id, page_key::text AS page_key, body,"
-                        "        ROW_NUMBER() OVER (PARTITION BY page_key ORDER BY created_at DESC, id DESC) AS rn"
-                        " FROM wiki_page_comments"
-                        " WHERE kb_id = $1::uuid"
-                        "   AND page_key = ANY($2::uuid[])"
-                        "   AND status = 'open'"
+                        " SELECT id::text AS id, scope_page_key::text AS page_key, body,"
+                        "        ROW_NUMBER() OVER (PARTITION BY scope_page_key ORDER BY created_at DESC, id DESC) AS rn"
+                        " FROM kb_directives"
+                        " WHERE kb_id = $1::uuid AND kind = 'comment'"
+                        "   AND scope_page_key = ANY($2::uuid[])"
+                        "   AND status IN ('open', 'failed')"
                         ")"
                         " SELECT id, page_key, body FROM ranked WHERE rn <= 20",
                         kb["id"],
@@ -645,8 +679,9 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                         )
                     if comment_ids:
                         skipped_count = await conn.fetchval(
-                            "SELECT COUNT(*) FROM wiki_page_comments"
-                            " WHERE kb_id = $1::uuid AND page_key = ANY($2::uuid[]) AND status = 'open'"
+                            "SELECT COUNT(*) FROM kb_directives"
+                            " WHERE kb_id = $1::uuid AND kind = 'comment'"
+                            "   AND scope_page_key = ANY($2::uuid[]) AND status IN ('open', 'failed')"
                             "   AND NOT (id = ANY($3::uuid[]))",
                             kb["id"],
                             target_page_keys,
@@ -728,9 +763,10 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 await _finish_run(conn, run_id, "succeeded", response_excerpt=response_excerpt)
                 if comment_ids:
                     await conn.execute(
-                        "UPDATE wiki_page_comments"
-                        " SET status = 'delivered', delivered_at = now(), delivered_compile_id = $1::uuid"
-                        " WHERE id = ANY($2::uuid[]) AND status = 'open'",
+                        "UPDATE kb_directives"
+                        " SET status = 'resolved', compiled_at = now(), compiled_run_id = $1::uuid,"
+                        "     resolved_at = now(), failure_reason = NULL"
+                        " WHERE id = ANY($2::uuid[]) AND kind = 'comment' AND status IN ('open', 'failed')",
                         run_id,
                         comment_ids,
                     )
@@ -758,6 +794,15 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
                 }
             except Exception as exc:
                 await _finish_run(conn, run_id, "failed", error_message=str(exc))
+                if comment_ids:
+                    await conn.execute(
+                        "UPDATE kb_directives"
+                        " SET status = 'failed', failure_reason = $1, compiled_run_id = $2::uuid"
+                        " WHERE id = ANY($3::uuid[]) AND kind = 'comment' AND status IN ('open', 'failed')",
+                        _safe_failure_reason(exc),
+                        run_id,
+                        comment_ids,
+                    )
                 await _update_kb_settings_run_state(conn, kb["id"], "failed", str(exc), advance_schedule, target.interval_minutes)
                 log_compile(
                     "run_failed",
@@ -772,28 +817,70 @@ async def run_target(pool: asyncpg.Pool, target: CompileTarget, *, advance_sched
             await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", f"compile:{kb['id']}")
 
 
+async def _advance_schedule_without_run(
+    conn,
+    knowledge_base_id: str,
+    interval_minutes: int | None,
+) -> None:
+    """Advance next_run_at without recording a compile_runs row.
+
+    Called when a KB is due but has no new sources or open/failed comments.
+    Leaves last_run_at / last_status unchanged so operators can still see the last real run.
+    """
+    if not interval_minutes:
+        return
+    await conn.execute(
+        "UPDATE knowledge_base_settings SET next_run_at = $1, updated_at = now() "
+        "WHERE knowledge_base_id = $2::uuid",
+        next_run_at(interval_minutes),
+        knowledge_base_id,
+    )
+
+
 async def run_due_schedules(pool: asyncpg.Pool, *, concurrency: int = 3) -> list[dict[str, Any]]:
     async with pool.acquire() as conn:
         await _cleanup_stale_compile_runs(conn, stale_after_seconds=settings.LLMWIKI_COMPILE_STALE_AFTER_SECONDS)
+    # Pre-flight: fetch all due KBs, but also detect whether each has actual work.
+    # KBs with no new sources and no open/failed comments advance next_run_at silently
+    # (no compile_runs row, no skipped telemetry noise).
     rows = await pool.fetch(
-        "SELECT kb.slug "
+        "SELECT kb.slug, kb.id::text AS kb_id, s.compile_interval_minutes,"
+        "       (new_src IS NOT NULL OR new_cmt IS NOT NULL) AS has_work "
         "FROM knowledge_base_settings s "
         "JOIN knowledge_bases kb ON kb.id = s.knowledge_base_id "
+        "LEFT JOIN LATERAL ("
+        "  SELECT 1 FROM documents d "
+        "  WHERE d.knowledge_base_id = kb.id "
+        "    AND d.updated_at > COALESCE(s.last_run_at, '-infinity'::timestamptz) "
+        "    AND NOT d.archived LIMIT 1"
+        ") new_src ON TRUE "
+        "LEFT JOIN LATERAL ("
+        "  SELECT 1 FROM kb_directives c "
+        "  WHERE c.kb_id = kb.id AND c.kind = 'comment' "
+        "    AND c.status IN ('open', 'failed') LIMIT 1"
+        ") new_cmt ON TRUE "
         "WHERE s.auto_compile_enabled = true AND s.provider_secret_encrypted IS NOT NULL "
         "AND (s.next_run_at IS NULL OR s.next_run_at <= now()) "
         "ORDER BY s.next_run_at NULLS FIRST, kb.slug",
     )
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def run_slug(slug: str) -> dict[str, Any]:
+    async def run_slug(row: asyncpg.Record) -> dict[str, Any]:
+        slug = row["slug"]
         async with semaphore:
+            if not row["has_work"]:
+                # No work detected — advance schedule silently (no compile_runs row).
+                async with pool.acquire() as conn:
+                    await _advance_schedule_without_run(conn, row["kb_id"], row["compile_interval_minutes"])
+                log_compile("run_auto_skipped", kb=slug, reason="no_new_sources_or_comments")
+                return {"knowledge_base": slug, "status": "skipped", "source_count": 0}
             try:
                 target = await load_target_from_settings(pool, slug)
                 return await run_target(pool, target, advance_schedule=True)
             except Exception as exc:
                 return {"knowledge_base": slug, "status": "failed", "error": str(exc)}
 
-    return await asyncio.gather(*(run_slug(row["slug"]) for row in rows)) if rows else []
+    return await asyncio.gather(*(run_slug(row) for row in rows)) if rows else []
 
 
 async def _invoke_provider(prompt: str, target: CompileTarget) -> dict[str, Any]:
