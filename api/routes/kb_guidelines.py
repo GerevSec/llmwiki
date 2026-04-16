@@ -16,7 +16,7 @@ from services.kb_guidelines import (
     update_guideline,
 )
 
-router = APIRouter(prefix="/api/kb", tags=["kb-guidelines"])
+router = APIRouter(prefix="/v1/knowledge-bases", tags=["kb-guidelines"])
 
 
 def _check_feature_flag() -> None:
@@ -27,6 +27,10 @@ def _check_feature_flag() -> None:
 class GuidelineCreate(BaseModel):
     body: str
     position: int | None = None
+
+
+class GuidelineBatchCreate(BaseModel):
+    bodies: list[str]
 
 
 class GuidelineUpdate(BaseModel):
@@ -64,6 +68,28 @@ async def post_guideline(
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
     return await create_guideline(pool, str(kb_id), body.body, user_id, body.position)
+
+
+@router.post("/{kb_id}/guidelines/batch", status_code=201)
+async def post_guidelines_batch(
+    kb_id: UUID,
+    body: GuidelineBatchCreate,
+    user_id: Annotated[str, Depends(get_user_id)],
+    request: Request,
+):
+    _check_feature_flag()
+    pool = request.app.state.pool
+    try:
+        await require_kb_access(pool, user_id, str(kb_id), ADMIN_ROLES)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
+    cleaned = [b.strip() for b in body.bodies if b and b.strip()]
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="bodies must contain at least one non-empty entry")
+    created = []
+    for entry in cleaned:
+        created.append(await create_guideline(pool, str(kb_id), entry, user_id, None))
+    return created
 
 
 @router.patch("/{kb_id}/guidelines/{guideline_id}")

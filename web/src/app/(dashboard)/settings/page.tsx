@@ -200,6 +200,7 @@ function ScheduleCard({
   onDeleteWiki,
   guidelines,
   onAddGuideline,
+  onAddGuidelines,
   onUpdateGuideline,
   onToggleGuideline,
   onDeleteGuideline,
@@ -227,6 +228,7 @@ function ScheduleCard({
   onDeleteWiki: (kbId: string, kbName: string) => void
   guidelines: Guideline[]
   onAddGuideline: (kbId: string, body: string) => Promise<void>
+  onAddGuidelines: (kbId: string, bodies: string[]) => Promise<void>
   onUpdateGuideline: (kbId: string, guidelineId: string, body: string) => Promise<void>
   onToggleGuideline: (kbId: string, guidelineId: string, isActive: boolean) => Promise<void>
   onDeleteGuideline: (kbId: string, guidelineId: string) => Promise<void>
@@ -642,23 +644,44 @@ function ScheduleCard({
             <textarea
               value={newGuidelineBody}
               onChange={(e) => setNewGuidelineBody(e.target.value)}
-              placeholder="Add a new guideline…"
-              rows={2}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              placeholder={`Add one or more guidelines (one per line)\n\nDo not include people as entities\nUse this structure: …\nFocus on …`}
+              rows={5}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed"
             />
-            <button
-              onClick={async () => {
-                if (!newGuidelineBody.trim()) return
-                setAddingGuideline(true)
-                try { await onAddGuideline(kb.id, newGuidelineBody.trim()); setNewGuidelineBody('') }
-                finally { setAddingGuideline(false) }
-              }}
-              disabled={addingGuideline || !newGuidelineBody.trim()}
-              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50 cursor-pointer"
-            >
-              {addingGuideline ? <Loader2 className="size-3.5 animate-spin" /> : null}
-              Add guideline
-            </button>
+            {(() => {
+              const parsed = newGuidelineBody.split('\n').map((l) => l.trim()).filter(Boolean)
+              const count = parsed.length
+              const label = count <= 1 ? 'Add guideline' : `Add ${count} guidelines`
+              const helper = count > 1
+                ? `${count} non-empty lines detected — each becomes a separate guideline.`
+                : 'One guideline per line. Each line becomes a separate standing rule.'
+              return (
+                <>
+                  <p className="text-xs text-muted-foreground">{helper}</p>
+                  <button
+                    onClick={async () => {
+                      if (parsed.length === 0) return
+                      setAddingGuideline(true)
+                      try {
+                        if (parsed.length === 1) {
+                          await onAddGuideline(kb.id, parsed[0])
+                        } else {
+                          await onAddGuidelines(kb.id, parsed)
+                        }
+                        setNewGuidelineBody('')
+                      } finally {
+                        setAddingGuideline(false)
+                      }
+                    }}
+                    disabled={addingGuideline || count === 0}
+                    className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50 cursor-pointer"
+                  >
+                    {addingGuideline ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                    {label}
+                  </button>
+                </>
+              )
+            })()}
           </div>
         </div>
       )}
@@ -796,7 +819,7 @@ export default function SettingsPage() {
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
         !GUIDELINES_COMMENTS_DISABLED
-          ? apiFetch<Guideline[]>(`/api/kb/${kb.id}/guidelines`, token).catch(() => [])
+          ? apiFetch<Guideline[]>(`/v1/knowledge-bases/${kb.id}/guidelines`, token).catch(() => [])
           : Promise.resolve([] as Guideline[]),
       ])
       return { kbId: kb.id, preview, runs, streamlining, schedule, members, guidelines }
@@ -980,7 +1003,7 @@ export default function SettingsPage() {
   const handleAddGuideline = async (kbId: string, body: string) => {
     if (!token) return
     try {
-      const g = await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines`, token, {
+      const g = await apiFetch<Guideline>(`/v1/knowledge-bases/${kbId}/guidelines`, token, {
         method: 'POST',
         body: JSON.stringify({ body }),
       })
@@ -991,10 +1014,25 @@ export default function SettingsPage() {
     }
   }
 
+  const handleAddGuidelines = async (kbId: string, bodies: string[]) => {
+    if (!token || bodies.length === 0) return
+    try {
+      const created = await apiFetch<Guideline[]>(`/v1/knowledge-bases/${kbId}/guidelines/batch`, token, {
+        method: 'POST',
+        body: JSON.stringify({ bodies }),
+      })
+      setGuidelinesByKb((prev) => ({ ...prev, [kbId]: [...(prev[kbId] || []), ...created] }))
+      toast.success(`Added ${created.length} guideline${created.length === 1 ? '' : 's'}`)
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to add guidelines')
+      throw err
+    }
+  }
+
   const handleUpdateGuideline = async (kbId: string, guidelineId: string, body: string) => {
     if (!token) return
     try {
-      const g = await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, {
+      const g = await apiFetch<Guideline>(`/v1/knowledge-bases/${kbId}/guidelines/${guidelineId}`, token, {
         method: 'PATCH',
         body: JSON.stringify({ body }),
       })
@@ -1016,7 +1054,7 @@ export default function SettingsPage() {
       [kbId]: (prev[kbId] || []).map((item) => (item.id === guidelineId ? { ...item, is_active: isActive } : item)),
     }))
     try {
-      await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, {
+      await apiFetch<Guideline>(`/v1/knowledge-bases/${kbId}/guidelines/${guidelineId}`, token, {
         method: 'PATCH',
         body: JSON.stringify({ is_active: isActive }),
       })
@@ -1033,7 +1071,7 @@ export default function SettingsPage() {
   const handleDeleteGuideline = async (kbId: string, guidelineId: string) => {
     if (!token) return
     try {
-      await apiFetch(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, { method: 'DELETE' })
+      await apiFetch(`/v1/knowledge-bases/${kbId}/guidelines/${guidelineId}`, token, { method: 'DELETE' })
       setGuidelinesByKb((prev) => ({
         ...prev,
         [kbId]: (prev[kbId] || []).filter((item) => item.id !== guidelineId),
@@ -1147,6 +1185,7 @@ export default function SettingsPage() {
               }}
               guidelines={guidelinesByKb[kb.id] || []}
               onAddGuideline={handleAddGuideline}
+              onAddGuidelines={handleAddGuidelines}
               onUpdateGuideline={handleUpdateGuideline}
               onToggleGuideline={handleToggleGuideline}
               onDeleteGuideline={handleDeleteGuideline}

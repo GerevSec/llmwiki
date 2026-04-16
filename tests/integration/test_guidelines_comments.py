@@ -115,13 +115,13 @@ async def _seed_comment(pool, *, page_key: str, status: str = "open") -> str:
 @pytest.mark.asyncio
 async def test_guideline_crud_lifecycle(client):
     # Initially empty
-    resp = await client.get(f"/api/kb/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
+    resp = await client.get(f"/v1/knowledge-bases/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
     assert resp.status_code == 200
     assert resp.json() == []
 
     # Create
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/guidelines",
+        f"/v1/knowledge-bases/{KB_A_ID}/guidelines",
         headers=auth_headers(USER_A_ID),
         json={"body": "Always cite sources"},
     )
@@ -132,13 +132,13 @@ async def test_guideline_crud_lifecycle(client):
     assert guideline["is_active"] is True
 
     # List includes it
-    resp = await client.get(f"/api/kb/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
+    resp = await client.get(f"/v1/knowledge-bases/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
     # Patch body
     resp = await client.patch(
-        f"/api/kb/{KB_A_ID}/guidelines/{gid}",
+        f"/v1/knowledge-bases/{KB_A_ID}/guidelines/{gid}",
         headers=auth_headers(USER_A_ID),
         json={"body": "Always cite primary sources"},
     )
@@ -147,7 +147,7 @@ async def test_guideline_crud_lifecycle(client):
 
     # Deactivate
     resp = await client.patch(
-        f"/api/kb/{KB_A_ID}/guidelines/{gid}",
+        f"/v1/knowledge-bases/{KB_A_ID}/guidelines/{gid}",
         headers=auth_headers(USER_A_ID),
         json={"is_active": False},
     )
@@ -156,13 +156,13 @@ async def test_guideline_crud_lifecycle(client):
 
     # Delete (archive)
     resp = await client.delete(
-        f"/api/kb/{KB_A_ID}/guidelines/{gid}",
+        f"/v1/knowledge-bases/{KB_A_ID}/guidelines/{gid}",
         headers=auth_headers(USER_A_ID),
     )
     assert resp.status_code == 204
 
     # No longer in list
-    resp = await client.get(f"/api/kb/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
+    resp = await client.get(f"/v1/knowledge-bases/{KB_A_ID}/guidelines", headers=auth_headers(USER_A_ID))
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -208,7 +208,7 @@ async def test_t2_archive_open_comment(client, pool):
     comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/comments/{comment_id}/archive",
+        f"/v1/knowledge-bases/{KB_A_ID}/comments/{comment_id}/archive",
         headers=auth_headers(USER_A_ID),
     )
     assert resp.status_code == 200
@@ -230,7 +230,7 @@ async def test_t3_archive_resolved_comment_is_bookkeeping(client, pool):
     comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="resolved")
 
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/comments/{comment_id}/archive",
+        f"/v1/knowledge-bases/{KB_A_ID}/comments/{comment_id}/archive",
         headers=auth_headers(USER_A_ID),
     )
     assert resp.status_code == 200
@@ -259,7 +259,7 @@ async def test_t4_promote_sets_orthogonal_fk(client, pool):
     comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/comments/{comment_id}/promote",
+        f"/v1/knowledge-bases/{KB_A_ID}/comments/{comment_id}/promote",
         headers=auth_headers(USER_A_ID),
         json={},
     )
@@ -287,7 +287,7 @@ async def test_t5_orphan_comment_archived_on_fetch(client, pool):
     comment_id = await _seed_comment(pool, page_key=ORPHAN_KEY, status="open")
 
     resp = await client.get(
-        f"/api/kb/{KB_A_ID}/pages/{ORPHAN_KEY}/comments",
+        f"/v1/knowledge-bases/{KB_A_ID}/pages/{ORPHAN_KEY}/comments",
         headers=auth_headers(USER_A_ID),
     )
     assert resp.status_code == 200
@@ -477,7 +477,7 @@ async def test_new_comment_pulls_next_run_at_forward(client, pool):
     )
 
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/pages/{PAGE_KEY}/comments",
+        f"/v1/knowledge-bases/{KB_A_ID}/pages/{PAGE_KEY}/comments",
         headers=auth_headers(USER_A_ID),
         json={"body": "Add more detail to the intro"},
     )

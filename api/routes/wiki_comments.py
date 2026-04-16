@@ -17,7 +17,7 @@ from services.wiki_comments import (
     transition_comment,
 )
 
-router = APIRouter(prefix="/api/kb", tags=["wiki-comments"])
+router = APIRouter(prefix="/v1/knowledge-bases", tags=["wiki-comments"])
 
 
 def _check_feature_flag() -> None:

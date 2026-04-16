@@ -756,7 +756,7 @@ export function KBDetail({
       setComments([])
       return
     }
-    apiFetch<WikiComment[]>(`/api/kb/${kbId}/pages/${activeWikiDocId}/comments`, token)
+    apiFetch<WikiComment[]>(`/v1/knowledge-bases/${kbId}/pages/${activeWikiDocId}/comments`, token)
       .then(setComments)
       .catch(() => setComments([]))
   }, [kbId, activeWikiDocId, token])
@@ -765,7 +765,7 @@ export function KBDetail({
     if (!token || !activeWikiDocId || !newCommentBody.trim()) return
     setCommentSubmitting(true)
     try {
-      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/pages/${activeWikiDocId}/comments`, token, {
+      const c = await apiFetch<WikiComment>(`/v1/knowledge-bases/${kbId}/pages/${activeWikiDocId}/comments`, token, {
         method: 'POST',
         body: JSON.stringify({ body: newCommentBody.trim() }),
       })
@@ -781,7 +781,7 @@ export function KBDetail({
   const handleArchiveComment = async (commentId: string) => {
     if (!token) return
     try {
-      await apiFetch(`/api/kb/${kbId}/comments/${commentId}/archive`, token, { method: 'POST' })
+      await apiFetch(`/v1/knowledge-bases/${kbId}/comments/${commentId}/archive`, token, { method: 'POST' })
       setComments((prev) => prev.filter((item) => item.id !== commentId))
     } catch (err) {
       toast.error((err as Error).message || 'Failed to archive comment')
@@ -792,7 +792,7 @@ export function KBDetail({
     if (!token) return
     try {
       const body = promoteOverrideBody.trim() || undefined
-      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/comments/${commentId}/promote`, token, {
+      const c = await apiFetch<WikiComment>(`/v1/knowledge-bases/${kbId}/comments/${commentId}/promote`, token, {
         method: 'POST',
         body: JSON.stringify({ body }),
       })
