@@ -3,6 +3,8 @@
 import * as React from 'react'
 import { ArrowLeft, Check, Copy, Loader2, Plus, Trash2, X } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { toast } from 'sonner'
 
 import { apiFetch } from '@/lib/api'
@@ -116,6 +118,25 @@ function formatBytes(bytes: number): string {
   const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   const value = bytes / Math.pow(1024, i)
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`
+}
+
+function GuidelineBody({ body, isActive }: { body: string; isActive: boolean }) {
+  return (
+    <div
+      className={
+        'min-w-0 flex-1 text-sm leading-relaxed ' +
+        '[&>ul]:list-disc [&>ul]:pl-5 [&>ul]:space-y-0.5 ' +
+        '[&_ul_ul]:list-[circle] [&_ul_ul]:pl-5 [&_ul_ul]:mt-0.5 ' +
+        '[&>ol]:list-decimal [&>ol]:pl-5 [&>ol]:space-y-0.5 ' +
+        '[&>p]:my-0 [&>p+p]:mt-1.5 ' +
+        '[&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[0.85em] ' +
+        '[&_a]:underline [&_a]:underline-offset-2 ' +
+        (isActive ? '' : 'line-through text-muted-foreground')
+      }
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+    </div>
+  )
 }
 
 function DeleteWikiDialog({
@@ -600,9 +621,9 @@ function ScheduleCard({
                 <textarea
                   value={editingBody}
                   onChange={(e) => setEditingBody(e.target.value)}
-                  rows={2}
+                  rows={Math.max(3, editingBody.split('\n').length + 1)}
                   autoFocus
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed"
                 />
                 <div className="flex gap-2">
                   <button
@@ -618,14 +639,14 @@ function ScheduleCard({
               </div>
             ) : (
               <div key={g.id} className="rounded-md bg-muted/40 px-3 py-2 text-sm flex items-start justify-between gap-3">
-                <div className="flex items-start gap-2 min-w-0">
+                <div className="flex items-start gap-2 min-w-0 flex-1">
                   <input
                     type="checkbox"
                     checked={g.is_active}
                     onChange={(e) => onToggleGuideline(kb.id, g.id, e.target.checked)}
-                    className="mt-0.5 shrink-0 cursor-pointer"
+                    className="mt-1 shrink-0 cursor-pointer"
                   />
-                  <span className={g.is_active ? '' : 'line-through text-muted-foreground'}>{g.body}</span>
+                  <GuidelineBody body={g.body} isActive={g.is_active} />
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <button
