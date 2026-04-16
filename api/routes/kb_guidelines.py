@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/kb", tags=["kb-guidelines"])
 
 
 def _check_feature_flag() -> None:
-    if not settings.ENABLE_KB_GUIDELINES_COMMENTS:
+    if settings.KB_GUIDELINES_COMMENTS_DISABLED:
         raise HTTPException(status_code=404, detail="Not found")
 
 

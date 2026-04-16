@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     SENTRY_DSN: str = ""
 
-    ENABLE_KB_GUIDELINES_COMMENTS: bool = False
+    KB_GUIDELINES_COMMENTS_DISABLED: bool = False
 
 
 settings = Settings()

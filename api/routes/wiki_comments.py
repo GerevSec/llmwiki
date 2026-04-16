@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/kb", tags=["wiki-comments"])
 
 
 def _check_feature_flag() -> None:
-    if not settings.ENABLE_KB_GUIDELINES_COMMENTS:
+    if settings.KB_GUIDELINES_COMMENTS_DISABLED:
         raise HTTPException(status_code=404, detail="Not found")
 
 
@@ -68,27 +68,6 @@ async def post_page_comment(
         raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
     return await create_comment(pool, str(kb_id), str(page_key), body.body, user_id)
 
-
-@router.post("/{kb_id}/comments/{comment_id}/resolve")
-async def resolve_comment(
-    kb_id: UUID,
-    comment_id: UUID,
-    user_id: Annotated[str, Depends(get_user_id)],
-    request: Request,
-):
-    _check_feature_flag()
-    pool = request.app.state.pool
-    try:
-        await require_kb_access(pool, user_id, str(kb_id), ADMIN_ROLES)
-    except PermissionError as exc:
-        raise HTTPException(status_code=404, detail="Knowledge base not found") from exc
-    try:
-        result = await transition_comment(pool, str(comment_id), "resolved", user_id)
-    except IllegalTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if result is None:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    return result
 
 
 @router.post("/{kb_id}/comments/{comment_id}/archive")
