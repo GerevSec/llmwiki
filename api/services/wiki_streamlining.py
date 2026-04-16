@@ -12,6 +12,7 @@ import httpx
 from config import settings
 from services.compile_logging import log_streamline, preview
 from services.encryption import decrypt_secret
+from services.kb_guidelines import render_guidelines_block
 from services.llm_json import loads_lenient_json
 from services.openrouter_client import post_openrouter_chat_completion
 from services.periodic_compile import (
@@ -238,7 +239,7 @@ async def determine_streamlining_scope(conn: asyncpg.Connection, knowledge_base_
     return StreamliningScope(STREAMLINING_SCOPE_FULL, pages[:MAX_SCOPE_PAGES], dirty_paths)
 
 
-def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningScope) -> str:
+def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningScope, guidelines_block: str = "") -> str:
     page_payload = [
         {
             "page_key": page["page_key"],
@@ -282,6 +283,8 @@ def build_streamlining_prompt(target: StreamliningTarget, scope: StreamliningSco
         lines.extend(f"- {item}" for item in scope.dirty_paths[:25])
     if target.prompt:
         lines.extend(["", "Additional instructions:", target.prompt.strip()])
+    if guidelines_block:
+        lines.extend(["", guidelines_block])
     lines.extend(["", "Pages in scope:", json.dumps(page_payload, indent=2)])
     return "\n".join(lines)
 
@@ -566,7 +569,8 @@ async def run_streamlining_target(pool: asyncpg.Pool, target: StreamliningTarget
             return {"knowledge_base": target.knowledge_base, "status": "skipped", "scope_type": scope.scope_type}
         run_id = await _record_streamlining_run(conn, target, scope, status="running")
         draft_release_id, _ = await create_draft_release(conn, target.knowledge_base_id, created_by="streamlining", created_by_run_id=run_id)
-    prompt = build_streamlining_prompt(target, scope)
+    guidelines_block = await render_guidelines_block(pool, target.knowledge_base_id)
+    prompt = build_streamlining_prompt(target, scope, guidelines_block)
     try:
         response = await _invoke_streamlining_provider(prompt, target)
         payload = _extract_json_payload(response["text"])

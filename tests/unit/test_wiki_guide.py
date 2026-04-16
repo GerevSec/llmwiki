@@ -186,6 +186,41 @@ class TestBuildStreamliningPromptInlines:
         prompt = self._sample_streamlining_prompt()
         assert "delete" in prompt, "streamlining schema should advertise the delete op"
 
+    def test_streamlining_prompt_injects_guidelines_block_before_pages(self):
+        from services.wiki_streamlining import (
+            StreamliningScope,
+            StreamliningTarget,
+            build_streamlining_prompt,
+        )
+
+        target = StreamliningTarget(
+            knowledge_base="example-kb",
+            knowledge_base_id="00000000-0000-0000-0000-000000000000",
+            provider_api_key="",
+            provider="openrouter",
+            model="test-model",
+            prompt="",
+            actor_user_id="00000000-0000-0000-0000-000000000001",
+            interval_minutes=1440,
+            active_release_id="00000000-0000-0000-0000-000000000002",
+        )
+        scope = StreamliningScope(
+            scope_type="full",
+            pages=[{"page_key": "p1", "path": "/wiki/", "filename": "overview.md", "title": "Overview", "content": "hi", "tags": [], "sort_order": 0, "full_path": "/wiki/overview.md"}],
+            dirty_paths=[],
+        )
+        guidelines = "<kb_guidelines>\n- Keep pages concise\n</kb_guidelines>"
+
+        prompt = build_streamlining_prompt(target, scope, guidelines_block=guidelines)
+
+        assert "<kb_guidelines>" in prompt
+        assert "Keep pages concise" in prompt
+        assert prompt.index("<kb_guidelines>") < prompt.index("Pages in scope:")
+
+    def test_streamlining_prompt_omits_guidelines_when_empty(self):
+        prompt = self._sample_streamlining_prompt()
+        assert "<kb_guidelines>" not in prompt
+
 
 # ─── tool_guide behavior ──────────────────────────────────────────────────
 
