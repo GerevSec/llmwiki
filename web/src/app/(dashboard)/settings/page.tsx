@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 
 import { apiFetch } from '@/lib/api'
 import { getPublicEnv } from '@/lib/public-env'
+import { splitMarkdownIntoGuidelines } from '@/lib/guideline-split'
 import { buildOAuthMcpConfig, MCP_URL } from '@/lib/mcp'
 import type { KnowledgeBase } from '@/lib/types'
 import { useKBStore, useUserStore } from '@/stores'
@@ -663,7 +664,7 @@ function ScheduleCard({
           ))}
           <div className="space-y-2 rounded-md border border-dashed border-border p-3">
             <p className="text-xs text-muted-foreground">
-              Each card is one guideline. Use the textarea like a markdown editor — bullet lists, sub-bullets, line breaks all preserved.
+              Paste or type a bulleted list — each top-level <code className="rounded bg-muted px-1">-</code> becomes its own guideline. Sub-bullets stay nested under their parent.
             </p>
             {drafts.map((draft, idx) => (
               <div key={idx} className="flex items-start gap-2">
@@ -676,10 +677,10 @@ function ScheduleCard({
                   }}
                   placeholder={
                     idx === 0
-                      ? 'Write a guideline…\n\n- supports bullets\n- and sub-bullets:\n  - like this'
-                      : 'Another guideline'
+                      ? '- First guideline\n- Second guideline\n  - with a sub-bullet\n  - and another\n- Third guideline'
+                      : 'More guidelines…'
                   }
-                  rows={3}
+                  rows={Math.max(4, draft.split('\n').length + 1)}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono leading-relaxed"
                 />
                 {drafts.length > 1 && (
@@ -695,9 +696,13 @@ function ScheduleCard({
               </div>
             ))}
             {(() => {
-              const cleaned = drafts.map((d) => d.trim()).filter(Boolean)
-              const count = cleaned.length
-              const label = count <= 1 ? 'Add guideline' : `Add ${count} guidelines`
+              const parsed = drafts.flatMap((d) => splitMarkdownIntoGuidelines(d))
+              const count = parsed.length
+              const label = count === 0
+                ? 'Add guideline'
+                : count === 1
+                  ? 'Add 1 guideline'
+                  : `Add ${count} guidelines`
               return (
                 <div className="flex items-center justify-between gap-2 pt-1">
                   <button
@@ -706,18 +711,18 @@ function ScheduleCard({
                     className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
                   >
                     <Plus className="size-3.5" />
-                    Add another
+                    Add another block
                   </button>
                   <button
                     type="button"
                     onClick={async () => {
-                      if (cleaned.length === 0) return
+                      if (parsed.length === 0) return
                       setAddingGuideline(true)
                       try {
-                        if (cleaned.length === 1) {
-                          await onAddGuideline(kb.id, cleaned[0])
+                        if (parsed.length === 1) {
+                          await onAddGuideline(kb.id, parsed[0])
                         } else {
-                          await onAddGuidelines(kb.id, cleaned)
+                          await onAddGuidelines(kb.id, parsed)
                         }
                         setDrafts([''])
                       } finally {
