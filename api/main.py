@@ -32,6 +32,7 @@ from routes.me import router as me_router
 from routes.usage import router as usage_router
 from routes.admin import router as admin_router
 from routes.internal import router as internal_router
+from routes.kb_guidelines import router as kb_guidelines_router
 from infra.tus import router as tus_router, cleanup_stale_uploads
 
 
@@ -113,4 +114,5 @@ app.include_router(me_router)
 app.include_router(usage_router)
 app.include_router(admin_router)
 app.include_router(internal_router)
+app.include_router(kb_guidelines_router)
 app.include_router(tus_router)
