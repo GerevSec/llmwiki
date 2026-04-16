@@ -1,6 +1,7 @@
-"""Integration tests for KB guidelines and wiki page comments (T1-T6 + CRUD)."""
+"""Integration tests for KB directives v2 status machine (kb_directives unified table)."""
 
 import pytest
+from datetime import datetime, timezone, timedelta
 
 from services.encryption import encrypt_secret
 from tests.helpers.jwt import auth_headers
@@ -10,26 +11,26 @@ from tests.integration.isolation.conftest import KB_A_ID, USER_A_ID
 PAGE_KEY = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 ORPHAN_KEY = "dddddddd-dddd-dddd-dddd-dddddddddddd"
 RELEASE_ID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+DOC_ID = "aaaaaaaa-1111-1111-1111-111111111111"
 
 
 @pytest.fixture(autouse=True)
 async def seed(pool, monkeypatch):
     import config
 
-    monkeypatch.setattr(config.settings, "ENABLE_KB_GUIDELINES_COMMENTS", True)
+    monkeypatch.setattr(config.settings, "KB_GUIDELINES_COMMENTS_DISABLED", False)
 
-    await pool.execute("DELETE FROM wiki_page_comments")
-    await pool.execute("DELETE FROM kb_guidelines")
+    await pool.execute("DELETE FROM kb_directives")
     await pool.execute("DELETE FROM wiki_release_pages")
     await pool.execute("DELETE FROM wiki_releases")
+    await pool.execute("DELETE FROM compiled_source_checkpoints")
+    await pool.execute("DELETE FROM compile_runs")
     await pool.execute("DELETE FROM document_chunks")
     await pool.execute("DELETE FROM document_pages")
     await pool.execute("DELETE FROM documents")
     await pool.execute("DELETE FROM knowledge_base_invites")
     await pool.execute("DELETE FROM knowledge_base_memberships")
     await pool.execute("DELETE FROM knowledge_base_settings")
-    await pool.execute("DELETE FROM compile_runs")
-    await pool.execute("DELETE FROM compiled_source_checkpoints")
     await pool.execute("DELETE FROM api_keys")
     await pool.execute("DELETE FROM knowledge_bases")
     await pool.execute("DELETE FROM users")
@@ -61,7 +62,8 @@ async def seed(pool, monkeypatch):
     await pool.execute(
         "INSERT INTO documents "
         "(id, knowledge_base_id, user_id, filename, title, path, file_type, status, content, version) "
-        "VALUES ('aaaaaaaa-1111-1111-1111-111111111111', $1, $2, 'source.md', 'Source', '/', 'md', 'ready', 'A useful source', 1)",
+        "VALUES ($1::uuid, $2::uuid, $3::uuid, 'source.md', 'Source', '/', 'md', 'ready', 'A useful source', 1)",
+        DOC_ID,
         KB_A_ID,
         USER_A_ID,
     )
@@ -94,10 +96,10 @@ async def _seed_active_release(pool, release_id: str, page_key: str | None = Non
 
 
 async def _seed_comment(pool, *, page_key: str, status: str = "open") -> str:
-    """Insert a comment and return its UUID as a string."""
+    """Insert a comment into kb_directives and return its UUID as a string."""
     row = await pool.fetchrow(
-        "INSERT INTO wiki_page_comments (kb_id, page_key, body, status, author_id) "
-        "VALUES ($1::uuid, $2::uuid, 'Fix the intro', $3, $4::uuid) "
+        "INSERT INTO kb_directives (kb_id, kind, scope_page_key, body, status, author_id) "
+        "VALUES ($1::uuid, 'comment', $2::uuid, 'Fix the intro', $3, $4::uuid) "
         "RETURNING id::text",
         KB_A_ID,
         page_key,
@@ -165,11 +167,11 @@ async def test_guideline_crud_lifecycle(client):
     assert resp.json() == []
 
 
-# ─── T1: open → delivered via compile ────────────────────────────────────────
+# ─── T1: open → resolved via compile ─────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_t1_compile_delivers_open_comments(client, pool, monkeypatch):
+async def test_t1_compile_resolves_open_comments(client, pool, monkeypatch):
     await _seed_active_release(pool, RELEASE_ID, page_key=PAGE_KEY)
     comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
@@ -190,36 +192,20 @@ async def test_t1_compile_delivers_open_comments(client, pool, monkeypatch):
     assert resp.json()[0]["status"] == "succeeded"
 
     row = await pool.fetchrow(
-        "SELECT status, delivered_compile_id FROM wiki_page_comments WHERE id = $1::uuid",
+        "SELECT status, compiled_run_id, compiled_at FROM kb_directives WHERE id = $1::uuid",
         comment_id,
     )
-    assert row["status"] == "delivered"
-    assert row["delivered_compile_id"] is not None
+    assert row["status"] == "resolved"
+    assert row["compiled_run_id"] is not None
+    assert row["compiled_at"] is not None
 
 
-# ─── T2: delivered → resolved ─────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_t2_resolve_delivered_comment(client, pool):
-    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="delivered")
-
-    resp = await client.post(
-        f"/api/kb/{KB_A_ID}/comments/{comment_id}/resolve",
-        headers=auth_headers(USER_A_ID),
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "resolved"
-    assert body["resolved_at"] is not None
-
-
-# ─── T3: delivered → archived ─────────────────────────────────────────────────
+# ─── T2: open → archived (admin suppression) ─────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_t3_archive_delivered_comment(client, pool):
-    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="delivered")
+async def test_t2_archive_open_comment(client, pool):
+    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
     resp = await client.post(
         f"/api/kb/{KB_A_ID}/comments/{comment_id}/archive",
@@ -228,13 +214,49 @@ async def test_t3_archive_delivered_comment(client, pool):
     assert resp.status_code == 200
     assert resp.json()["status"] == "archived"
 
+    row = await pool.fetchrow(
+        "SELECT status FROM kb_directives WHERE id = $1::uuid",
+        comment_id,
+    )
+    assert row["status"] == "archived"
 
-# ─── T4: delivered → promoted, guideline created ──────────────────────────────
+
+# ─── T3: resolved → archived (bookkeeping; wiki unchanged) ───────────────────
 
 
 @pytest.mark.asyncio
-async def test_t4_promote_delivered_comment_creates_guideline(client, pool):
-    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="delivered")
+async def test_t3_archive_resolved_comment_is_bookkeeping(client, pool):
+    await _seed_active_release(pool, RELEASE_ID, page_key=PAGE_KEY)
+    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="resolved")
+
+    resp = await client.post(
+        f"/api/kb/{KB_A_ID}/comments/{comment_id}/archive",
+        headers=auth_headers(USER_A_ID),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "archived"
+
+    # Active wiki release and its page should be untouched
+    release_row = await pool.fetchrow(
+        "SELECT status FROM wiki_releases WHERE id = $1::uuid",
+        RELEASE_ID,
+    )
+    assert release_row["status"] == "published"
+
+    page_row = await pool.fetchrow(
+        "SELECT content FROM wiki_release_pages WHERE release_id = $1::uuid AND page_key = $2::uuid",
+        RELEASE_ID,
+        PAGE_KEY,
+    )
+    assert page_row["content"] == "# Overview"
+
+
+# ─── T4: promote is orthogonal to status ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_t4_promote_sets_orthogonal_fk(client, pool):
+    comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
     resp = await client.post(
         f"/api/kb/{KB_A_ID}/comments/{comment_id}/promote",
@@ -243,11 +265,13 @@ async def test_t4_promote_delivered_comment_creates_guideline(client, pool):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "promoted"
-    assert body["promoted_to_guideline_id"] is not None
+    # Status unchanged — promote is orthogonal
+    assert body["status"] == "open"
+    assert body["promoted_to_directive_id"] is not None
 
+    # A new guideline row was created
     guideline_count = await pool.fetchval(
-        "SELECT COUNT(*) FROM kb_guidelines WHERE kb_id = $1::uuid AND archived_at IS NULL",
+        "SELECT COUNT(*) FROM kb_directives WHERE kb_id = $1::uuid AND kind = 'guideline' AND archived_at IS NULL",
         KB_A_ID,
     )
     assert guideline_count == 1
@@ -270,22 +294,198 @@ async def test_t5_orphan_comment_archived_on_fetch(client, pool):
     assert resp.json() == []
 
     row = await pool.fetchrow(
-        "SELECT status, system_note FROM wiki_page_comments WHERE id = $1::uuid",
+        "SELECT status, system_note FROM kb_directives WHERE id = $1::uuid",
         comment_id,
     )
     assert row["status"] == "archived"
     assert row["system_note"] == "orphaned"
 
 
-# ─── T6: open comment → resolve → 409 ────────────────────────────────────────
+# ─── T6: compile failure marks failed, retry resolves ────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_t6_resolve_open_comment_returns_409(client, pool):
+async def test_t6_compile_failure_marks_failed_and_retries(client, pool, monkeypatch):
+    await _seed_active_release(pool, RELEASE_ID, page_key=PAGE_KEY)
     comment_id = await _seed_comment(pool, page_key=PAGE_KEY, status="open")
 
+    call_count = 0
+
+    async def fake_invoke(prompt, target):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated provider failure")
+        return {
+            "stop_reason": "stop",
+            "request_id": "req-retry",
+            "text_excerpt": "AUTOMATION SUMMARY\n- Fixed",
+        }
+
+    monkeypatch.setattr("services.periodic_compile._invoke_provider", fake_invoke)
+
+    # First compile: fails
     resp = await client.post(
-        f"/api/kb/{KB_A_ID}/comments/{comment_id}/resolve",
-        headers=auth_headers(USER_A_ID),
+        "/internal/compile-due",
+        headers={"x-llmwiki-automation-secret": "test-automation-secret"},
     )
-    assert resp.status_code == 409
+    assert resp.status_code == 200
+    assert resp.json()[0]["status"] == "failed"
+
+    row = await pool.fetchrow(
+        "SELECT status, failure_reason FROM kb_directives WHERE id = $1::uuid",
+        comment_id,
+    )
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "ProviderError"  # RuntimeError is scrubbed
+
+    # Reset schedule so the KB is due again for the retry
+    await pool.execute(
+        "UPDATE knowledge_base_settings SET next_run_at = now() WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+
+    # Second compile: succeeds — failed comment is in snapshot (status IN ('open','failed'))
+    resp = await client.post(
+        "/internal/compile-due",
+        headers={"x-llmwiki-automation-secret": "test-automation-secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()[0]["status"] == "succeeded"
+
+    row = await pool.fetchrow(
+        "SELECT status, compiled_run_id, compiled_at FROM kb_directives WHERE id = $1::uuid",
+        comment_id,
+    )
+    assert row["status"] == "resolved"
+    assert row["compiled_run_id"] is not None
+    assert row["compiled_at"] is not None
+
+
+# ─── failure_reason scrubbing (unit) ─────────────────────────────────────────
+
+
+def test_failure_reason_scrubs_unknown_exceptions_to_ProviderError():
+    from services.periodic_compile import _safe_failure_reason
+
+    assert _safe_failure_reason(RuntimeError("boom")) == "ProviderError"
+    assert _safe_failure_reason(ValueError("sensitive data")) == "ProviderError"
+    assert _safe_failure_reason(Exception("unknown")) == "ProviderError"
+
+
+def test_failure_reason_passes_through_known_exception_names():
+    from services.periodic_compile import _safe_failure_reason
+
+    class ProviderTimeout(Exception):
+        pass
+
+    class ProviderRateLimited(Exception):
+        pass
+
+    class TimeoutError(Exception):  # noqa: A001
+        pass
+
+    assert _safe_failure_reason(ProviderTimeout()) == "ProviderTimeout"
+    assert _safe_failure_reason(ProviderRateLimited()) == "ProviderRateLimited"
+    assert _safe_failure_reason(TimeoutError()) == "TimeoutError"
+
+
+# ─── Skip logic: silent advance when no new work ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_compile_skipped_when_no_new_work(client, pool):
+    # Push last_run_at into the future so the pre-flight query sees no new sources
+    await pool.execute(
+        "UPDATE knowledge_base_settings SET last_run_at = now() + interval '1 hour' "
+        "WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+    # No comments seeded
+
+    runs_before = await pool.fetchval("SELECT COUNT(*) FROM compile_runs")
+
+    resp = await client.post(
+        "/internal/compile-due",
+        headers={"x-llmwiki-automation-secret": "test-automation-secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()[0]["status"] == "skipped"
+
+    runs_after = await pool.fetchval("SELECT COUNT(*) FROM compile_runs")
+    assert runs_after == runs_before  # silent advance — no compile_runs row
+
+    next_run = await pool.fetchval(
+        "SELECT next_run_at FROM knowledge_base_settings WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+    assert next_run > datetime.now(timezone.utc)
+
+
+# ─── Skip logic: Amendment 3 — comment not starved ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_comment_not_starved_when_inserted_after_preflight(client, pool):
+    # No new sources in pre-flight (last_run_at beyond document updated_at)
+    await pool.execute(
+        "UPDATE knowledge_base_settings SET last_run_at = now() + interval '1 hour' "
+        "WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+    # Also make the source non-pending inside run_target (checkpoint matches)
+    await pool.execute(
+        "INSERT INTO compiled_source_checkpoints (knowledge_base_id, document_id, compiled_version, compiled_at) "
+        "VALUES ($1::uuid, $2::uuid, 1, now())",
+        KB_A_ID,
+        DOC_ID,
+    )
+
+    # Seed open comment — pre-flight sees new_cmt IS NOT NULL → has_work=True
+    await _seed_comment(pool, page_key=PAGE_KEY, status="open")
+
+    runs_before = await pool.fetchval("SELECT COUNT(*) FROM compile_runs")
+
+    resp = await client.post(
+        "/internal/compile-due",
+        headers={"x-llmwiki-automation-secret": "test-automation-secret"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()[0]["status"] == "skipped"
+
+    runs_after = await pool.fetchval("SELECT COUNT(*) FROM compile_runs")
+    assert runs_after == runs_before + 1  # Amendment 3: visible skipped run, not silent
+
+    skipped_run = await pool.fetchrow(
+        "SELECT status FROM compile_runs ORDER BY started_at DESC LIMIT 1"
+    )
+    assert skipped_run["status"] == "skipped"
+
+
+# ─── Pull-forward: new comment advances next_run_at ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_new_comment_pulls_next_run_at_forward(client, pool):
+    await _seed_active_release(pool, RELEASE_ID, page_key=PAGE_KEY)
+
+    # Set next_run_at far in the future
+    await pool.execute(
+        "UPDATE knowledge_base_settings SET next_run_at = now() + interval '2 hours' "
+        "WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+
+    resp = await client.post(
+        f"/api/kb/{KB_A_ID}/pages/{PAGE_KEY}/comments",
+        headers=auth_headers(USER_A_ID),
+        json={"body": "Add more detail to the intro"},
+    )
+    assert resp.status_code == 201
+
+    row = await pool.fetchrow(
+        "SELECT next_run_at FROM knowledge_base_settings WHERE knowledge_base_id = $1::uuid",
+        KB_A_ID,
+    )
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=31)
+    assert row["next_run_at"] <= deadline
