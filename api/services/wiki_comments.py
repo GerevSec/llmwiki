@@ -5,14 +5,17 @@ from typing import Any
 import asyncpg
 
 _COMMENT_COLUMNS = (
-    "id, kb_id, page_key, body, status, system_note, author_id, "
-    "created_at, delivered_at, delivered_compile_id, resolved_at, resolved_by, "
-    "promoted_to_guideline_id"
+    "id, kb_id, scope_page_key, body, status, failure_reason, system_note, author_id, "
+    "created_at, compiled_at, compiled_run_id, resolved_at, resolved_by, "
+    "promoted_to_directive_id"
 )
 
-# Allowed HTTP-initiated transitions (open→archived is system-only via lazy orphan path)
+# Admin-initiated manual transitions only.
+# Auto transitions (open→resolved, open→failed) are handled by the compile pipeline.
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "delivered": {"resolved", "archived"},
+    "open":     {"archived"},
+    "failed":   {"archived"},
+    "resolved": {"archived"},
 }
 
 
@@ -31,8 +34,8 @@ async def list_page_comments(
     )
 
     rows = await pool.fetch(
-        f"SELECT {_COMMENT_COLUMNS} FROM wiki_page_comments "
-        "WHERE kb_id = $1::uuid AND page_key = $2::uuid AND status != 'archived' "
+        f"SELECT {_COMMENT_COLUMNS} FROM kb_directives "
+        "WHERE kb_id = $1::uuid AND kind = 'comment' AND scope_page_key = $2::uuid AND status != 'archived' "
         "ORDER BY created_at ASC",
         kb_id,
         page_key,
@@ -49,14 +52,14 @@ async def list_page_comments(
             if orphan_ids:
                 # MVCC race-safe: status='open' predicate prevents double-archival
                 await pool.execute(
-                    "UPDATE wiki_page_comments "
-                    "SET status = 'archived', resolved_by = NULL, system_note = 'orphaned', resolved_at = NOW() "
-                    "WHERE id = ANY($1::uuid[]) AND status = 'open'",
+                    "UPDATE kb_directives "
+                    "SET status = 'archived', archived_at = now(), system_note = 'orphaned', updated_at = now() "
+                    "WHERE id = ANY($1::uuid[]) AND kind = 'comment' AND status = 'open'",
                     orphan_ids,
                 )
                 rows = await pool.fetch(
-                    f"SELECT {_COMMENT_COLUMNS} FROM wiki_page_comments "
-                    "WHERE kb_id = $1::uuid AND page_key = $2::uuid AND status != 'archived' "
+                    f"SELECT {_COMMENT_COLUMNS} FROM kb_directives "
+                    "WHERE kb_id = $1::uuid AND kind = 'comment' AND scope_page_key = $2::uuid AND status != 'archived' "
                     "ORDER BY created_at ASC",
                     kb_id,
                     page_key,
@@ -73,13 +76,20 @@ async def create_comment(
     author_id: str,
 ) -> dict[str, Any]:
     row = await pool.fetchrow(
-        f"INSERT INTO wiki_page_comments (kb_id, page_key, body, author_id) "
-        f"VALUES ($1::uuid, $2::uuid, $3, $4::uuid) "
+        f"INSERT INTO kb_directives (kb_id, kind, scope_page_key, body, status, author_id) "
+        f"VALUES ($1::uuid, 'comment', $2::uuid, $3, 'open', $4::uuid) "
         f"RETURNING {_COMMENT_COLUMNS}",
         kb_id,
         page_key,
         body,
         author_id,
+    )
+    # Pull the next compile forward so newly-filed comments don't wait a full interval.
+    await pool.execute(
+        "UPDATE knowledge_base_settings "
+        "SET next_run_at = LEAST(COALESCE(next_run_at, now() + interval '30 seconds'), now() + interval '30 seconds') "
+        "WHERE knowledge_base_id = $1::uuid",
+        kb_id,
     )
     return dict(row)  # type: ignore[arg-type]
 
@@ -94,16 +104,17 @@ async def transition_comment(
     new_status: str,
     actor_id: str,
 ) -> dict[str, Any] | None:
-    """Transition a comment status. Raises IllegalTransitionError on invalid moves.
+    """Transition a comment status via admin action. Raises IllegalTransitionError on invalid moves.
 
-    Allowed HTTP transitions:
-      delivered → resolved  (sets resolved_at + resolved_by)
-      delivered → archived  (sets resolved_at)
+    Allowed HTTP transitions (all admin-initiated):
+      open     → archived  (suppresses comment before next compile)
+      failed   → archived  (suppresses a failed comment)
+      resolved → archived  (bookkeeping; does not change wiki content)
 
-    open → archived is system-only (lazy orphan path); NOT callable here.
+    Auto transitions (open→resolved, open→failed) are handled by the compile pipeline.
     """
     row = await pool.fetchrow(
-        "SELECT id, status FROM wiki_page_comments WHERE id = $1::uuid",
+        "SELECT id, status FROM kb_directives WHERE id = $1::uuid AND kind = 'comment'",
         comment_id,
     )
     if not row:
@@ -116,23 +127,14 @@ async def transition_comment(
             f"Cannot transition comment from '{current}' to '{new_status}'"
         )
 
-    if new_status == "resolved":
-        updated = await pool.fetchrow(
-            f"UPDATE wiki_page_comments "
-            f"SET status = 'resolved', resolved_at = NOW(), resolved_by = $1::uuid "
-            f"WHERE id = $2::uuid AND status = 'delivered' "
-            f"RETURNING {_COMMENT_COLUMNS}",
-            actor_id,
-            comment_id,
-        )
-    else:  # archived
-        updated = await pool.fetchrow(
-            f"UPDATE wiki_page_comments "
-            f"SET status = 'archived', resolved_at = NOW() "
-            f"WHERE id = $1::uuid AND status = 'delivered' "
-            f"RETURNING {_COMMENT_COLUMNS}",
-            comment_id,
-        )
+    updated = await pool.fetchrow(
+        f"UPDATE kb_directives "
+        f"SET status = 'archived', archived_at = now(), updated_at = now() "
+        f"WHERE id = $1::uuid AND kind = 'comment' AND status = $2 "
+        f"RETURNING {_COMMENT_COLUMNS}",
+        comment_id,
+        current,
+    )
     return dict(updated) if updated else None
 
 
@@ -142,17 +144,17 @@ async def promote_comment(
     guideline_body: str | None,
     actor_id: str,
 ) -> dict[str, Any] | None:
-    """Promote a delivered comment to a KB guideline in a single transaction."""
+    """Promote a comment to a KB guideline (orthogonal to comment status).
+
+    Any comment in any status may be promoted. Creates a new kind='guideline' row
+    and sets promoted_to_directive_id on the comment. Comment status is unchanged.
+    """
     row = await pool.fetchrow(
-        "SELECT id, kb_id, body, status FROM wiki_page_comments WHERE id = $1::uuid",
+        "SELECT id, kb_id, body FROM kb_directives WHERE id = $1::uuid AND kind = 'comment'",
         comment_id,
     )
     if not row:
         return None
-    if row["status"] != "delivered":
-        raise IllegalTransitionError(
-            f"Cannot promote comment with status '{row['status']}'; only 'delivered' comments may be promoted"
-        )
 
     kb_id = str(row["kb_id"])
     body = guideline_body or row["body"]
@@ -161,9 +163,10 @@ async def promote_comment(
     try:
         async with conn.transaction():
             guideline = await conn.fetchrow(
-                "INSERT INTO kb_guidelines (kb_id, body, position, created_by) "
-                "VALUES ($1::uuid, $2, "
-                "  (SELECT COALESCE(MAX(position), 0) + 1 FROM kb_guidelines WHERE kb_id = $1::uuid AND archived_at IS NULL), "
+                "INSERT INTO kb_directives (kb_id, kind, body, position, author_id) "
+                "VALUES ($1::uuid, 'guideline', $2, "
+                "  (SELECT COALESCE(MAX(position), 0) + 1 FROM kb_directives "
+                "   WHERE kb_id = $1::uuid AND kind = 'guideline' AND archived_at IS NULL), "
                 "  $3::uuid) "
                 "RETURNING id",
                 kb_id,
@@ -171,9 +174,9 @@ async def promote_comment(
                 actor_id,
             )
             await conn.execute(
-                "UPDATE wiki_page_comments "
-                "SET status = 'promoted', promoted_to_guideline_id = $1::uuid "
-                "WHERE id = $2::uuid AND status = 'delivered'",
+                "UPDATE kb_directives "
+                "SET promoted_to_directive_id = $1::uuid, updated_at = now() "
+                "WHERE id = $2::uuid AND kind = 'comment'",
                 str(guideline["id"]),
                 comment_id,
             )
@@ -181,7 +184,7 @@ async def promote_comment(
         await pool.release(conn)
 
     updated = await pool.fetchrow(
-        f"SELECT {_COMMENT_COLUMNS} FROM wiki_page_comments WHERE id = $1::uuid",
+        f"SELECT {_COMMENT_COLUMNS} FROM kb_directives WHERE id = $1::uuid AND kind = 'comment'",
         comment_id,
     )
     return dict(updated) if updated else None
