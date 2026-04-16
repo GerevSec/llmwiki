@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { Upload as UploadIcon, BookOpen, ArrowUpRight, Loader2, Lock, PencilLine, Sparkles } from 'lucide-react'
+import { Upload as UploadIcon, BookOpen, ArrowUpRight, Loader2, Lock, PencilLine, Sparkles, MessageSquare, X, Send } from 'lucide-react'
 import * as tus from 'tus-js-client'
 import { useUserStore } from '@/stores'
 import { useKBDocuments } from '@/hooks/useKBDocuments'
@@ -20,6 +20,24 @@ import type { DocumentListItem, WikiNode, WikiSubsection } from '@/lib/types'
 import { getPublicEnv } from '@/lib/public-env'
 
 const API_URL = getPublicEnv('NEXT_PUBLIC_API_URL') || 'http://localhost:8000'
+const GUIDELINES_COMMENTS_ENABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_ENABLED') === 'true'
+const KB_ADMIN_ROLES = new Set(['owner', 'admin'])
+
+interface WikiComment {
+  id: string
+  kb_id: string
+  page_key: string
+  body: string
+  status: 'open' | 'delivered' | 'resolved' | 'archived' | 'promoted'
+  system_note: string | null
+  author_id: string | null
+  created_at: string
+  delivered_at: string | null
+  delivered_compile_id: string | null
+  resolved_at: string | null
+  resolved_by: string | null
+  promoted_to_guideline_id: string | null
+}
 
 const wikiPathCache = new Map<string, string>()
 
@@ -159,6 +177,7 @@ type Props = {
   kbId: string
   kbSlug?: string
   kbName: string
+  kbRole: string
   wikiDirectEditingEnabled: boolean
   canEditWikiDirectly: boolean
 }
@@ -166,9 +185,11 @@ type Props = {
 export function KBDetail({
   kbId,
   kbName,
+  kbRole,
   wikiDirectEditingEnabled,
   canEditWikiDirectly,
 }: Props) {
+  const isKbAdmin = KB_ADMIN_ROLES.has(kbRole)
   const router = useRouter()
   const searchParams = useSearchParams()
   const token = useUserStore((s) => s.accessToken)
@@ -719,6 +740,79 @@ export function KBDetail({
     if (files.length > 0) uploadFiles(files)
   }
 
+  // Comments sidebar state
+  const [showComments, setShowComments] = React.useState(false)
+  const [comments, setComments] = React.useState<WikiComment[]>([])
+  const [newCommentBody, setNewCommentBody] = React.useState('')
+  const [commentSubmitting, setCommentSubmitting] = React.useState(false)
+  const [promoteCommentId, setPromoteCommentId] = React.useState<string | null>(null)
+  const [promoteOverrideBody, setPromoteOverrideBody] = React.useState('')
+
+  // Load comments when the active wiki page changes
+  React.useEffect(() => {
+    if (!GUIDELINES_COMMENTS_ENABLED || !token || !activeWikiDocId) {
+      setComments([])
+      return
+    }
+    apiFetch<WikiComment[]>(`/api/kb/${kbId}/pages/${activeWikiDocId}/comments`, token)
+      .then(setComments)
+      .catch(() => setComments([]))
+  }, [kbId, activeWikiDocId, token])
+
+  const handleAddComment = async () => {
+    if (!token || !activeWikiDocId || !newCommentBody.trim()) return
+    setCommentSubmitting(true)
+    try {
+      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/pages/${activeWikiDocId}/comments`, token, {
+        method: 'POST',
+        body: JSON.stringify({ body: newCommentBody.trim() }),
+      })
+      setComments((prev) => [...prev, c])
+      setNewCommentBody('')
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to add comment')
+    } finally {
+      setCommentSubmitting(false)
+    }
+  }
+
+  const handleResolveComment = async (commentId: string) => {
+    if (!token) return
+    try {
+      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/comments/${commentId}/resolve`, token, { method: 'POST' })
+      setComments((prev) => prev.map((item) => (item.id === commentId ? c : item)))
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to resolve comment')
+    }
+  }
+
+  const handleArchiveComment = async (commentId: string) => {
+    if (!token) return
+    try {
+      await apiFetch(`/api/kb/${kbId}/comments/${commentId}/archive`, token, { method: 'POST' })
+      setComments((prev) => prev.filter((item) => item.id !== commentId))
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to archive comment')
+    }
+  }
+
+  const handlePromoteComment = async (commentId: string) => {
+    if (!token) return
+    try {
+      const body = promoteOverrideBody.trim() || undefined
+      const c = await apiFetch<WikiComment>(`/api/kb/${kbId}/comments/${commentId}/promote`, token, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      })
+      setComments((prev) => prev.map((item) => (item.id === commentId ? c : item)))
+      setPromoteCommentId(null)
+      setPromoteOverrideBody('')
+      toast.success('Comment promoted to guideline')
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to promote comment')
+    }
+  }
+
   const showMainLoading =
     loading ||
     !selectionHydrated ||
@@ -841,15 +935,26 @@ export function KBDetail({
                           : 'Direct edits are disabled here. Add sources or ask Claude via MCP to update the wiki.'}
                       </p>
                     </div>
-                    {canEditWikiDirectly && activeWikiDocId ? (
-                      <button
-                        onClick={() => setEditingWikiPage((current) => !current)}
-                        className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent transition-colors cursor-pointer"
-                      >
-                        <PencilLine className="size-4" />
-                        {editingWikiPage ? 'Back to preview' : 'Edit page'}
-                      </button>
-                    ) : null}
+                    <div className="flex items-center gap-2">
+                      {GUIDELINES_COMMENTS_ENABLED && (
+                        <button
+                          onClick={() => setShowComments((c) => !c)}
+                          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent transition-colors cursor-pointer"
+                        >
+                          <MessageSquare className="size-4" />
+                          {showComments ? 'Hide comments' : `Comments${comments.length > 0 ? ` (${comments.length})` : ''}`}
+                        </button>
+                      )}
+                      {canEditWikiDirectly && activeWikiDocId ? (
+                        <button
+                          onClick={() => setEditingWikiPage((current) => !current)}
+                          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-accent transition-colors cursor-pointer"
+                        >
+                          <PencilLine className="size-4" />
+                          {editingWikiPage ? 'Back to preview' : 'Edit page'}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
                 <div className="min-h-0 flex-1">
@@ -901,6 +1006,95 @@ export function KBDetail({
             </div>
           )}
         </div>
+        {GUIDELINES_COMMENTS_ENABLED && showComments && !!wikiActivePath && !activeSourceDocId && (
+          <div className="w-80 shrink-0 border-l border-border flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <span className="text-sm font-medium">Comments</span>
+              <button
+                onClick={() => setShowComments(false)}
+                className="rounded-md p-1 text-muted-foreground hover:bg-accent cursor-pointer"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {comments.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No comments yet for this page.</p>
+              ) : (
+                comments.map((c) => (
+                  <div key={c.id} className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={
+                        c.status === 'resolved' ? 'text-green-600 dark:text-green-400 font-medium' :
+                        c.status === 'promoted' ? 'text-purple-600 dark:text-purple-400 font-medium' :
+                        c.status === 'delivered' ? 'text-primary font-medium' :
+                        'text-muted-foreground'
+                      }>{c.status}</span>
+                      <span className="text-muted-foreground">{new Date(c.created_at).toLocaleDateString()}</span>
+                    </div>
+                    <p className="text-foreground leading-relaxed">{c.body}</p>
+                    {isKbAdmin && c.status === 'delivered' && promoteCommentId !== c.id && (
+                      <div className="flex gap-1.5 pt-1">
+                        <button
+                          onClick={() => handleResolveComment(c.id)}
+                          className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
+                        >Resolve</button>
+                        <button
+                          onClick={() => { setPromoteCommentId(c.id); setPromoteOverrideBody('') }}
+                          className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
+                        >Promote</button>
+                        <button
+                          onClick={() => handleArchiveComment(c.id)}
+                          className="rounded px-2 py-1 text-xs text-destructive border border-destructive/30 hover:bg-destructive/10 cursor-pointer"
+                        >Archive</button>
+                      </div>
+                    )}
+                    {isKbAdmin && c.status === 'delivered' && promoteCommentId === c.id && (
+                      <div className="space-y-1.5 pt-1">
+                        <textarea
+                          value={promoteOverrideBody}
+                          onChange={(e) => setPromoteOverrideBody(e.target.value)}
+                          placeholder="Override text (optional — leave blank to use comment body)"
+                          rows={2}
+                          autoFocus
+                          className="w-full rounded border border-input bg-background px-2 py-1.5 text-xs"
+                        />
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={() => handlePromoteComment(c.id)}
+                            className="rounded px-2 py-1 text-xs border border-border hover:bg-accent cursor-pointer"
+                          >Promote to guideline</button>
+                          <button
+                            onClick={() => { setPromoteCommentId(null); setPromoteOverrideBody('') }}
+                            className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
+                          >Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="border-t border-border p-3 space-y-2">
+              <textarea
+                value={newCommentBody}
+                onChange={(e) => setNewCommentBody(e.target.value)}
+                placeholder="Add a comment…"
+                rows={3}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleAddComment() }}
+              />
+              <button
+                onClick={handleAddComment}
+                disabled={commentSubmitting || !newCommentBody.trim()}
+                className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50 cursor-pointer"
+              >
+                {commentSubmitting ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+                Submit
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <SelectionActionBar

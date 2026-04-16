@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { apiFetch } from '@/lib/api'
+import { getPublicEnv } from '@/lib/public-env'
 import { buildOAuthMcpConfig, MCP_URL } from '@/lib/mcp'
 import type { KnowledgeBase } from '@/lib/types'
 import { useKBStore, useUserStore } from '@/stores'
@@ -41,6 +42,19 @@ interface CompileRun {
   error_message: string | null
   started_at: string
   finished_at: string | null
+  telemetry?: { comments_skipped_count?: number } | null
+}
+
+interface Guideline {
+  id: string
+  kb_id: string
+  body: string
+  position: number
+  is_active: boolean
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  archived_at: string | null
 }
 
 interface StreamliningRun {
@@ -90,6 +104,7 @@ interface CompilePreview {
 }
 
 const ADMIN_ROLES = new Set(['owner', 'admin'])
+const GUIDELINES_COMMENTS_ENABLED = getPublicEnv('NEXT_PUBLIC_GUIDELINES_COMMENTS_ENABLED') === 'true'
 const DEFAULT_MAX_SOURCES = 20
 const DEFAULT_MAX_TOOL_ROUNDS = 50
 const DEFAULT_MAX_TOKENS = 50_000
@@ -181,6 +196,11 @@ function ScheduleCard({
   onUpdateMember,
   onRemoveMember,
   onDeleteWiki,
+  guidelines,
+  onAddGuideline,
+  onUpdateGuideline,
+  onToggleGuideline,
+  onDeleteGuideline,
 }: {
   kb: KnowledgeBase
   schedule: CompileSchedule | undefined
@@ -202,10 +222,19 @@ function ScheduleCard({
   onUpdateMember: (kbId: string, memberId: string, role: string) => void
   onRemoveMember: (kbId: string, memberId: string) => void
   onDeleteWiki: (kbId: string, kbName: string) => void
+  guidelines: Guideline[]
+  onAddGuideline: (kbId: string, body: string) => Promise<void>
+  onUpdateGuideline: (kbId: string, guidelineId: string, body: string) => Promise<void>
+  onToggleGuideline: (kbId: string, guidelineId: string, isActive: boolean) => Promise<void>
+  onDeleteGuideline: (kbId: string, guidelineId: string) => Promise<void>
 }) {
   const isAdmin = ADMIN_ROLES.has(kb.role)
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [inviteRole, setInviteRole] = React.useState('viewer')
+  const [newGuidelineBody, setNewGuidelineBody] = React.useState('')
+  const [addingGuideline, setAddingGuideline] = React.useState(false)
+  const [editingGuidelineId, setEditingGuidelineId] = React.useState<string | null>(null)
+  const [editingBody, setEditingBody] = React.useState('')
 
   React.useEffect(() => {
     setInviteRole('viewer')
@@ -549,6 +578,83 @@ function ScheduleCard({
         </div>
       )}
 
+      {isAdmin && GUIDELINES_COMMENTS_ENABLED && (
+        <div className="space-y-2">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">KB Guidelines</div>
+          {guidelines.length === 0 && (
+            <p className="text-xs text-muted-foreground">No guidelines yet. Add standing rules the AI should follow when compiling this wiki.</p>
+          )}
+          {guidelines.map((g) => (
+            editingGuidelineId === g.id ? (
+              <div key={g.id} className="rounded-md bg-muted/40 px-3 py-2 space-y-2">
+                <textarea
+                  value={editingBody}
+                  onChange={(e) => setEditingBody(e.target.value)}
+                  rows={2}
+                  autoFocus
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => { await onUpdateGuideline(kb.id, g.id, editingBody); setEditingGuidelineId(null) }}
+                    disabled={!editingBody.trim()}
+                    className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-50 cursor-pointer"
+                  >Save</button>
+                  <button
+                    onClick={() => setEditingGuidelineId(null)}
+                    className="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
+                  >Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div key={g.id} className="rounded-md bg-muted/40 px-3 py-2 text-sm flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={g.is_active}
+                    onChange={(e) => onToggleGuideline(kb.id, g.id, e.target.checked)}
+                    className="mt-0.5 shrink-0 cursor-pointer"
+                  />
+                  <span className={g.is_active ? '' : 'line-through text-muted-foreground'}>{g.body}</span>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => { setEditingGuidelineId(g.id); setEditingBody(g.body) }}
+                    className="rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent cursor-pointer"
+                  >Edit</button>
+                  <button
+                    onClick={() => onDeleteGuideline(kb.id, g.id)}
+                    className="rounded p-1 text-destructive hover:bg-destructive/10 cursor-pointer"
+                  ><Trash2 className="size-3.5" /></button>
+                </div>
+              </div>
+            )
+          ))}
+          <div className="space-y-2 rounded-md border border-dashed border-border p-3">
+            <textarea
+              value={newGuidelineBody}
+              onChange={(e) => setNewGuidelineBody(e.target.value)}
+              placeholder="Add a new guideline…"
+              rows={2}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            />
+            <button
+              onClick={async () => {
+                if (!newGuidelineBody.trim()) return
+                setAddingGuideline(true)
+                try { await onAddGuideline(kb.id, newGuidelineBody.trim()); setNewGuidelineBody('') }
+                finally { setAddingGuideline(false) }
+              }}
+              disabled={addingGuideline || !newGuidelineBody.trim()}
+              className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50 cursor-pointer"
+            >
+              {addingGuideline ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              Add guideline
+            </button>
+          </div>
+        </div>
+      )}
+
       {isAdmin && (
         <div className="space-y-1.5">
           <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">Recent compile runs</div>
@@ -564,6 +670,9 @@ function ScheduleCard({
                     </span>
                     <span className="text-muted-foreground">{run.provider}</span>
                     <span className="text-muted-foreground">{run.source_count} source{run.source_count === 1 ? '' : 's'}</span>
+                    {GUIDELINES_COMMENTS_ENABLED && (run.telemetry?.comments_skipped_count ?? 0) > 0 && (
+                      <span className="text-muted-foreground">{run.telemetry!.comments_skipped_count} comment{run.telemetry!.comments_skipped_count === 1 ? '' : 's'} skipped</span>
+                    )}
                   </div>
                   <span className="text-muted-foreground">{new Date(run.started_at).toLocaleString()}</span>
                 </div>
@@ -632,6 +741,7 @@ export default function SettingsPage() {
   const [streamliningRuns, setStreamliningRuns] = React.useState<Record<string, StreamliningRun[]>>({})
   const [schedules, setSchedules] = React.useState<Record<string, CompileSchedule>>({})
   const [membersByKb, setMembersByKb] = React.useState<Record<string, Member[]>>({})
+  const [guidelinesByKb, setGuidelinesByKb] = React.useState<Record<string, Guideline[]>>({})
   const oauthConfigJson = buildOAuthMcpConfig()
 
   React.useEffect(() => {
@@ -644,7 +754,7 @@ export default function SettingsPage() {
     if (!token || kbLoading || knowledgeBases.length === 0) return
     const adminKbs = knowledgeBases.filter((kb) => ADMIN_ROLES.has(kb.role))
     Promise.all(adminKbs.map(async (kb) => {
-      const [preview, runs, streamlining, schedule, members] = await Promise.all([
+      const [preview, runs, streamlining, schedule, members, guidelines] = await Promise.all([
         apiFetch<CompilePreview>(`/v1/knowledge-bases/${kb.id}/compile-preview`, token).catch(() => ({ pending_source_count: 0 })),
         apiFetch<CompileRun[]>(`/v1/knowledge-bases/${kb.id}/compile-runs?limit=5`, token).catch(() => []),
         apiFetch<StreamliningRun[]>(`/v1/knowledge-bases/${kb.id}/streamlining-runs?limit=5`, token).catch(() => []),
@@ -676,14 +786,18 @@ export default function SettingsPage() {
           next_streamlining_at: null,
         })),
         apiFetch<Member[]>(`/v1/knowledge-bases/${kb.id}/members`, token).catch(() => []),
+        GUIDELINES_COMMENTS_ENABLED
+          ? apiFetch<Guideline[]>(`/api/kb/${kb.id}/guidelines`, token).catch(() => [])
+          : Promise.resolve([] as Guideline[]),
       ])
-      return { kbId: kb.id, preview, runs, streamlining, schedule, members }
+      return { kbId: kb.id, preview, runs, streamlining, schedule, members, guidelines }
     })).then((results) => {
       setPendingCounts(Object.fromEntries(results.map((r) => [r.kbId, r.preview.pending_source_count])))
       setCompileRuns(Object.fromEntries(results.map((r) => [r.kbId, r.runs])))
       setStreamliningRuns(Object.fromEntries(results.map((r) => [r.kbId, r.streamlining])))
       setSchedules(Object.fromEntries(results.map((r) => [r.kbId, r.schedule])))
       setMembersByKb(Object.fromEntries(results.map((r) => [r.kbId, r.members])))
+      setGuidelinesByKb(Object.fromEntries(results.map((r) => [r.kbId, r.guidelines])))
     }).catch(() => {})
   }, [token, kbLoading, knowledgeBases])
 
@@ -852,6 +966,72 @@ export default function SettingsPage() {
     }
   }
 
+  const handleAddGuideline = async (kbId: string, body: string) => {
+    if (!token) return
+    try {
+      const g = await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines`, token, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      })
+      setGuidelinesByKb((prev) => ({ ...prev, [kbId]: [...(prev[kbId] || []), g] }))
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to add guideline')
+      throw err
+    }
+  }
+
+  const handleUpdateGuideline = async (kbId: string, guidelineId: string, body: string) => {
+    if (!token) return
+    try {
+      const g = await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+      })
+      setGuidelinesByKb((prev) => ({
+        ...prev,
+        [kbId]: (prev[kbId] || []).map((item) => (item.id === guidelineId ? g : item)),
+      }))
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to update guideline')
+      throw err
+    }
+  }
+
+  const handleToggleGuideline = async (kbId: string, guidelineId: string, isActive: boolean) => {
+    if (!token) return
+    // Optimistic update
+    setGuidelinesByKb((prev) => ({
+      ...prev,
+      [kbId]: (prev[kbId] || []).map((item) => (item.id === guidelineId ? { ...item, is_active: isActive } : item)),
+    }))
+    try {
+      await apiFetch<Guideline>(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: isActive }),
+      })
+    } catch (err) {
+      // Revert optimistic update
+      setGuidelinesByKb((prev) => ({
+        ...prev,
+        [kbId]: (prev[kbId] || []).map((item) => (item.id === guidelineId ? { ...item, is_active: !isActive } : item)),
+      }))
+      toast.error((err as Error).message || 'Failed to update guideline')
+    }
+  }
+
+  const handleDeleteGuideline = async (kbId: string, guidelineId: string) => {
+    if (!token) return
+    try {
+      await apiFetch(`/api/kb/${kbId}/guidelines/${guidelineId}`, token, { method: 'DELETE' })
+      setGuidelinesByKb((prev) => ({
+        ...prev,
+        [kbId]: (prev[kbId] || []).filter((item) => item.id !== guidelineId),
+      }))
+    } catch (err) {
+      toast.error((err as Error).message || 'Failed to delete guideline')
+    }
+  }
+
   const handleDeleteWiki = async () => {
     if (!deleteDialog) return
     setDeletingKbId(deleteDialog.kbId)
@@ -953,6 +1133,11 @@ export default function SettingsPage() {
                 setDeleteDialog({ kbId, kbName })
                 setDeleteConfirmation('')
               }}
+              guidelines={guidelinesByKb[kb.id] || []}
+              onAddGuideline={handleAddGuideline}
+              onUpdateGuideline={handleUpdateGuideline}
+              onToggleGuideline={handleToggleGuideline}
+              onDeleteGuideline={handleDeleteGuideline}
             />
           ))}
           {!kbLoading && knowledgeBases.length === 0 && <p className="text-sm text-muted-foreground">No knowledge bases found.</p>}
