@@ -3,7 +3,7 @@ import json
 import logging
 
 from mcp.server.fastmcp import FastMCP, Context
-from mcp.types import TextContent, ImageContent
+from mcp.types import TextContent, ImageContent, ToolAnnotations
 
 from db import scoped_query, scoped_queryrow
 from .helpers import (
@@ -242,6 +242,12 @@ def register(mcp: FastMCP) -> None:
             "When reading sources to compile wiki pages, note the filename and page ranges for citation."
         ),
         structured_output=False,
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
     )
     async def read(
         ctx: Context,

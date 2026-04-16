@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from db import scoped_query
 from .helpers import get_user_id
@@ -13,6 +14,12 @@ def register(mcp: FastMCP) -> None:
             "Call this first to discover available KBs and their slugs. "
             "Pass the returned `kb_slug` to `search`, `read`, `write`, `delete`, "
             "and `get_kb_guidelines`."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
         ),
     )
     async def list_knowledge_bases(ctx: Context) -> str:

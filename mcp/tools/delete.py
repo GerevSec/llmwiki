@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from db import scoped_query, scoped_queryrow, service_execute, get_pool
 from .helpers import get_user_id, require_kb_role, glob_match, resolve_path
@@ -31,6 +32,12 @@ def register(mcp: FastMCP) -> None:
             "- `path=\"/wiki/**\"` — delete the entire wiki\n\n"
             "Note: overview.md and log.md are structural pages and cannot be deleted.\n"
             "Returns a list of deleted files. This action cannot be undone."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
         ),
     )
     async def delete(

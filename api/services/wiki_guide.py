@@ -109,6 +109,18 @@ graph LR
 ```
 ````
 
+**Mermaid gotchas — MUST follow:**
+- Always **quote** node labels that contain `/`, `:`, `(`, `)`, or punctuation that mermaid treats as syntax. Write `A["/wiki/concepts/foo.md"]`, NOT `A[/wiki/concepts/foo.md]`. The unquoted form collides with mermaid's parallelogram-shape syntax (`[/text/]`) and the whole diagram fails to render.
+- When you want a node to act as a link to another wiki page, do it with a human-readable label plus a `click` directive, not by stuffing the path into the label:
+  ```mermaid
+  graph TD
+      OV["Overview"]
+      ARCH["Architecture"]
+      OV --> ARCH
+      click ARCH href "/wiki/concepts/architecture.md"
+  ```
+- Keep each diagram focused. If a flowchart has more than ~15 nodes it becomes too wide to read — split it into multiple smaller diagrams by topic.
+
 **Tables** — use for ANY structured comparison:
 - Feature matrices, pros/cons, timelines, metrics
 - If you're listing 3+ items with attributes, it should be a table

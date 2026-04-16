@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from db import scoped_query
 from .helpers import get_user_id, resolve_kb
@@ -14,6 +15,12 @@ def register(mcp: FastMCP) -> None:
             "how the wiki should be compiled. Call this before `write` to understand "
             "the KB's editorial standards.\n\n"
             "Use `list_knowledge_bases` first to find available `kb_slug` values."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
         ),
     )
     async def get_kb_guidelines(ctx: Context, kb_slug: str) -> str:

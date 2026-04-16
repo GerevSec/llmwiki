@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from config import settings
 from db import scoped_query
@@ -104,6 +105,18 @@ graph LR
 ```
 ````
 
+**Mermaid gotchas — MUST follow:**
+- Always **quote** node labels that contain `/`, `:`, `(`, `)`, or punctuation that mermaid treats as syntax. Write `A["/wiki/concepts/foo.md"]`, NOT `A[/wiki/concepts/foo.md]`. The unquoted form collides with mermaid's parallelogram-shape syntax (`[/text/]`) and the whole diagram fails to render.
+- When you want a node to act as a link to another wiki page, do it with a human-readable label plus a `click` directive, not by stuffing the path into the label:
+  ```mermaid
+  graph TD
+      OV["Overview"]
+      ARCH["Architecture"]
+      OV --> ARCH
+      click ARCH href "/wiki/concepts/architecture.md"
+  ```
+- Keep each diagram focused. If a flowchart has more than ~15 nodes it becomes too wide to read — split it into multiple smaller diagrams by topic.
+
 **Tables** — use for ANY structured comparison:
 - Feature matrices, pros/cons, timelines, metrics
 - If you're listing 3+ items with attributes, it should be a table
@@ -181,6 +194,12 @@ def register(mcp: FastMCP) -> None:
             "1. Call `list_knowledge_bases` to discover available KBs and their slugs.\n"
             "2. Pass `kb_slug` to `search`, `read`, `write`, or `delete`.\n"
             "3. Optionally call `get_kb_guidelines(kb_slug)` before writing to understand editorial standards."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
         ),
     )
     async def guide(ctx: Context) -> str:

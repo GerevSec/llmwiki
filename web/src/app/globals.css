@@ -354,12 +354,23 @@
 
 /* Mermaid diagrams inside wiki content */
 .wiki-content .mermaid-block {
-  @apply my-6 flex justify-center overflow-x-auto rounded-xl border border-border/50 bg-muted/20 p-4;
+  @apply my-6 block overflow-x-auto rounded-xl border border-border/50 bg-muted/20 p-4;
 }
 .wiki-content .mermaid-block svg {
-  max-width: 100%;
+  display: block;
+  margin: 0 auto;
   height: auto;
   overflow: visible;
+}
+.wiki-content .mermaid-block--failed {
+  @apply space-y-2;
+}
+.wiki-content .mermaid-block__error {
+  @apply text-xs text-muted-foreground;
+}
+.wiki-content .mermaid-block__source {
+  @apply text-[13px] leading-relaxed font-mono text-foreground/80 bg-background/60 rounded-md p-3 border border-border/40;
+  white-space: pre-wrap;
 }
 .wiki-content .mermaid-block :is(p, div, span) {
   margin: 0 !important;

@@ -2,6 +2,7 @@ import logging
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from db import scoped_query
 from .helpers import get_user_id, resolve_kb, deep_link, glob_match, MAX_LIST, MAX_SEARCH
@@ -136,6 +137,12 @@ def register(mcp: FastMCP) -> None:
             "Use `tags` to filter by document tags.\n\n"
             "BREAKING CHANGE: `kb_slug` is now required. Call `list_knowledge_bases` first to find "
             "available slugs. Passing an empty string is no longer supported."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
         ),
     )
     async def search(

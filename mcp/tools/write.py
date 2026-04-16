@@ -3,6 +3,7 @@ from datetime import date
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 
 from db import scoped_queryrow, service_queryrow, service_execute, get_pool
 from .helpers import get_user_id, require_kb_role, deep_link, resolve_path
@@ -237,6 +238,12 @@ def register(mcp: FastMCP) -> None:
             "- create: create a new page (title and tags are REQUIRED)\n"
             "- str_replace: replace exact text in an existing page (read first)\n"
             "- append: add content to the end of an existing page"
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
         ),
     )
     async def write(
